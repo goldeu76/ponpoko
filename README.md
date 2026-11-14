@@ -27,7 +27,7 @@
 
 ## 📸 스크린샷
 
-> 저장소 루트에 `docs/` 폴더를 만들고 스크린샷을 `screenshot1.png`, `screenshot2.png`로 넣어주세요.
+
 
 ![인게임 스크린샷 1](./docs/screenshot1.png)
 ![인게임 스크린샷 2](./docs/screenshot2.png)
