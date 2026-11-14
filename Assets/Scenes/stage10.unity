@@ -2408,6 +2408,43 @@ MonoBehaviour:
   m_Spacing: {x: 0, y: 0}
   m_Constraint: 1
   m_ConstraintCount: 10
+--- !u!1 &668345021
+GameObject:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  serializedVersion: 6
+  m_Component:
+  - component: {fileID: 668345022}
+  m_Layer: 5
+  m_Name: inc
+  m_TagString: Untagged
+  m_Icon: {fileID: 0}
+  m_NavMeshLayer: 0
+  m_StaticEditorFlags: 0
+  m_IsActive: 1
+--- !u!224 &668345022
+RectTransform:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 668345021}
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: 0, y: 0, z: 0}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_ConstrainProportionsScale: 0
+  m_Children:
+  - {fileID: 1815066364}
+  - {fileID: 2114139933}
+  m_Father: {fileID: 1710657442}
+  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+  m_AnchorMin: {x: 0.5, y: 0.5}
+  m_AnchorMax: {x: 0.5, y: 0.5}
+  m_AnchoredPosition: {x: 0, y: 40}
+  m_SizeDelta: {x: 100, y: 100}
+  m_Pivot: {x: 0.5, y: 0.5}
 --- !u!1 &677243313
 GameObject:
   m_ObjectHideFlags: 0
@@ -7721,8 +7758,7 @@ RectTransform:
   - {fileID: 1891775065}
   - {fileID: 1916278600}
   - {fileID: 593477328}
-  - {fileID: 1815066364}
-  - {fileID: 2114139933}
+  - {fileID: 668345022}
   m_Father: {fileID: 0}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
   m_AnchorMin: {x: 0, y: 0}
@@ -7847,11 +7883,11 @@ RectTransform:
   m_LocalScale: {x: 1.1114725, y: 1.1114725, z: 1.1114725}
   m_ConstrainProportionsScale: 0
   m_Children: []
-  m_Father: {fileID: 1710657442}
+  m_Father: {fileID: 668345022}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
   m_AnchorMin: {x: 0.5, y: 0}
   m_AnchorMax: {x: 0.5, y: 0}
-  m_AnchoredPosition: {x: 533.3334, y: 33.536163}
+  m_AnchoredPosition: {x: 533.3334, y: -456.46387}
   m_SizeDelta: {x: 500, y: 150}
   m_Pivot: {x: 0.5, y: 0.5}
 --- !u!114 &1815066365
@@ -8657,6 +8693,7 @@ MonoBehaviour:
   floor4Clip: {fileID: 8300000, guid: 9d02404440129704285ab28f81b14366, type: 3}
   floor5Clip: {fileID: 8300000, guid: 1be24f0b73e857a44bea7d3c6fd53d63, type: 3}
   crashSoundDuration: 0.45
+  deathSpinMultiplier: 2
   fallToFirstFloor: 1
   walk: {fileID: 8300000, guid: b50f1c68854ca5b48bcc000cafdad50a, type: 3}
   jump: {fileID: 8300000, guid: d13a2139456520142beaac5a799601d4, type: 3}
@@ -8965,11 +9002,11 @@ RectTransform:
   m_LocalScale: {x: 1.1114725, y: 1.1114725, z: 1.1114725}
   m_ConstrainProportionsScale: 0
   m_Children: []
-  m_Father: {fileID: 1710657442}
+  m_Father: {fileID: 668345022}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
   m_AnchorMin: {x: 0.5, y: 0}
   m_AnchorMax: {x: 0.5, y: 0}
-  m_AnchoredPosition: {x: 750, y: 33.536163}
+  m_AnchoredPosition: {x: 750, y: -456.46387}
   m_SizeDelta: {x: 100, y: 150}
   m_Pivot: {x: 0.5, y: 0.5}
 --- !u!114 &2114139934
