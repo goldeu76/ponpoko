@@ -1,199 +1,226 @@
-﻿using System.Collections;               // (1)의미: IEnumerator(코루틴) 쓰려면 필수. 없으면 코루틴 선언 자체가 에러.
-using UnityEngine;                      // (2) MonoBehaviour, Rigidbody2D, Input 등 유니티 기본 클래스 전부 여기 있음.
-using UnityEngine.SceneManagement;      // (3) SceneManager.LoadScene() 쓰려면 필요. "씬 전환"은 UnityEngine 네임스페이스에 없음!
-using UnityEngine.Tilemaps;             // (4) Tilemap 클래스. 사다리가 타일맵이라 사다리 중앙 X좌표 계산할 때 씀.
+﻿using System.Collections;          // IEnumerator(코루틴 리턴형)을 쓰려면 반드시 필요
+using UnityEngine;
+using UnityEngine.SceneManagement; // SceneManager.LoadScene() 등 씬 전환용
+using UnityEngine.Tilemaps;        // Tilemap 클래스(WorldToCell, HasTile 등)용
 
+/*
+ ================================================================================
+  [playerController 한눈에 보기]  (나중에 볼 때 여기부터 읽기)
+ ================================================================================
+ 1.스크립트 구조(메인루틴 실행 순서)
+ (1)Start -> FixedUpdate -> Update -> LateUpdate -> FixedUpdate -> Update ... (코루틴 시트 0번 참고)
+ (2)역할 분담 : Update = 입력받기/상태판정/애니메이션,  FixedUpdate = 물리(rb.velocity) 처리,  LateUpdate = 스프라이트 마무리 덮어쓰기
+ (2-1)왜 나누나 : 입력은 매프레임 체크해야 안놓치고(Update), 물리는 일정 간격(기본0.02초)으로 계산되므로(FixedUpdate) 물리관련 값은 FixedUpdate에서 건드려야 떨림이 없다.
+
+ 2.이 스크립트에서 쓴 핵심 기법 목록 (아래 본문에 ※ 표시로 자세히 적어놨음)
+ (1)Linecast / Raycast 로 바닥 감지 (LayerMask 사용)
+ (2)Rigidbody2D 의 gravityScale 을 구간별로 바꿔서 점프 3단계(상승-정점-하강) 만들기
+ (3)코루틴으로 점프 처리 + 애니메이션을 시간에 맞춰 수동 재생(anim.Play + anim.Update(0f))
+ (4)사다리 : 트리거(isTrigger) 콜라이더 + 태그("ladder","laddertop") + 중앙 X 스냅
+ (5)Tilemap 으로 사다리 중앙 X 구하기 (WorldToCell, HasTile, GetCellCenterWorld)
+ (6)카운터 방식(ladderTopOverlapCount) / 히스테리시스(-0.05f) 로 트리거 깜빡임 방지
+ (7)Bounds(col.bounds) 로 피벗과 상관없이 콜라이더 실제 발바닥 위치 구하기
+ (8)Physics2D.Distance 로 점프중 "윗층 함정" 판정
+ (9)층 판정(Y좌표 분기) + 사망 연출(중력 역산, 회전 애니메이션)
+
+ 3.이 스크립트 사용 전 인스펙터 체크리스트
+ (1)Player 오브젝트에 Rigidbody2D, Collider2D(BoxCollider2D 권장), Animator, SpriteRenderer, AudioSource 필요 (Start에서 GetComponent 로 가져오므로 없으면 null 에러)
+ (2)groundLayer 에 바닥 레이어 지정 (안하면 바닥감지 전부 실패 -> 점프도 안됨)
+ (3)사다리 오브젝트 : isTrigger 체크 + 태그 "ladder" / 꼭대기 오브젝트 : isTrigger 체크 + 태그 "laddertop"
+ (4)위험물 태그 : "monster", "trap", "fall"  (태그를 Tag 목록에 먼저 만들어놔야 함)
+ (5)애니메이터 파라미터 : IsGrounded(bool), IsRunning(bool), IsClimbing(bool), ClimbSpeed(float)
+ (6)애니메이터 상태 이름 : "Idle", "death", "jump"(또는 "Jump")  -> 이름이 다르면 anim.Play 가 조용히 실패함(에러X 주의)
+ ================================================================================
+*/
 public class playerController : MonoBehaviour
 {
-    // 컴포넌트 캐싱 변수 선언 영역
-    // (1)왜 전역으로 선언하나: GetComponent<>()는 "그 순간 오브젝트에 붙은 컴포넌트를 뒤져 찾는" 메소드라 매 프레임 부르면 성능 버림.
-    //   Start()에서 딱 한 번만 찾아서 여기 저장(캐싱)해두고 계속 재사용하는 기법.
-    // (2)이 변수들은 "참조변수"다. 실제 데이터를 복사하는 게 아니라 메모리 주소만 저장. rb.velocity를 바꾸면 실제 리지드바디 속도가 바뀜.
-    Rigidbody2D rb;          // 물리(속도·중력) 제어. 이 스크립트의 핵심.
-    Animator anim;           // 애니메이션 상태 전환 및 프레임 직접 제어.
-    SpriteRenderer sp;       // 스프라이트 이미지 교체(정면/측면). Idle 시 방향에 따라 갈아끼우기.
-    Collider2D col;          // 충돌체. 발 위치 계산, 트랩 판정에 씀.
+    // ------------------------------------------------------------------
+    // 1.컴포넌트 참조변수 (Start에서 GetComponent 로 채운다)
+    // (1)매 프레임 GetComponent 를 호출하면 느리므로 Start 에서 한번만 가져와서 변수에 저장해둔다
+    // ------------------------------------------------------------------
+    Rigidbody2D rb;      // 물리(속도, 중력) 담당
+    Animator anim;       // 애니메이터 파라미터/상태 제어
+    SpriteRenderer sp;   // 스프라이트 이미지 직접 교체할때 사용 (LateUpdate)
+    Collider2D col;      // 발바닥 위치(bounds) 계산, 함정 거리계산에 사용
 
-    // 플레이어 이동 및 물리 관련 세팅값
-    // [SerializeField] (1)의미: private 필드인데도 인스펙터에 노출시켜주는 어트리뷰트.
-    //   (2)왜 씀: public으로 선언하면 정보 은닉성이 깨져서 다른 스크립트가 마음대로 바꿀 수 있음.
-    //   private으로 막아두되 인스펙터에서만 조절하고 싶을 때 사용. 직렬화만 시켜줄 뿐 접근제한자는 안 바꿈.
-    // [Header("...")] : 인스펙터에 굵은 제목줄 그려주는 어트리뷰트. 변수 많을 때 그룹핑용. 기능은 전혀 없음.
-    // [Tooltip("...")] : 인스펙터에서 마우스 올리면 말풍선 설명 뜸. 몇 달 뒤 "이 값이 뭐였지?" 방지용.
-    [SerializeField] float speed = 1.15f;        // 걷기 속도 (유닛/초)
-    [SerializeField] float ladderSpeed = 1f;     // 사다리 오르내리기 속도
-    [SerializeField] LayerMask groundLayer;      // (1)의미: 바닥으로 판정할 레이어를 비트마스크로 지정. int형 비트마스크.
-                                                 // (2)왜 필요: Linecast/Raycast 마지막 매개변수로 "어떤 레이어만 감지할지" 골라줘야
-                                                 //   몬스터나 아이템에 레이가 닿아도 바닥으로 오판 안 함.
+    // ------------------------------------------------------------------
+    // 2.인스펙터 노출 변수
+    // ※ [SerializeField] : private 변수인데도 인스펙터창에 보이게 해주는 속성(Attribute)
+    // (1)public 으로 열면 다른 스크립트가 마음대로 바꿀 수 있으므로, 인스펙터에서만 조절하고 싶을땐 private + [SerializeField] 를 쓴다
+    // (2)주의 : 인스펙터에 값이 한번 저장되면 코드의 초기값(= 1.15f 등)을 바꿔도 반영 안된다. 인스펙터에서 직접 바꾸거나 컴포넌트 우클릭 > Reset 해야함
+    // ※ [Header("제목")] : 인스펙터에서 변수 그룹위에 제목글씨를 달아준다 (정리용)
+    // ※ [Tooltip("설명")] : 인스펙터에서 변수에 마우스를 올리면 설명이 뜬다
+    // ------------------------------------------------------------------
+    [SerializeField] float speed = 1.15f;        // 평지 이동속도
+    [SerializeField] float ladderSpeed = 1f;     // 사다리 오르내리는 속도
+
+    // ※ LayerMask : 레이캐스트가 "어떤 레이어만 검사할지" 거르는 필터
+    // (1)인스펙터에서 체크박스로 레이어를 선택한다. 이 값을 Raycast/Linecast 마지막 매개변수로 넣는다
+    // (2)안넣으면 플레이어 자기 자신이나 사다리 트리거 등 모든걸 맞춰버려서 오작동한다
+    [SerializeField] LayerMask groundLayer;
 
     [Header("원작 아케이드 점프 세팅 (X속도 고정 / Y성분으로 숏·롱 분단)")]
-    // (1)왜 X속도를 고정하나: 일반 플랫포머는 점프 중 공중 방향전환이 되지만 원작 아케이드는 점프하면 그 순간
-    //   정해진 속도로만 날아간다. 그래야 착지점 예측이 가능하고 원작의 "꽉 막힌" 조작감 재현됨.
-    // (2)구현: 점프 코루틴 진입 시 axisH를 읽어 고정 dirX를 만들고, 그 뒤로는 입력 무시하고 fixedVelX 재대입.
-    [Tooltip("점프 중 고정 X축 속도 (걷기 속도와 맞춰 옆으로 밀리는 가속감 제거)")]
+    // (1)원작처럼 점프중엔 방향전환 불가 -> 점프 시작할때 X속도를 고정시킨다(fixedVelX)
+    // (2)제자리 점프(숏) vs 이동중 점프(롱)는 위로 튀는 힘(Y)만 다르게 줘서 구분한다
     [SerializeField] float fixedJumpSpeedX = 1.15f;
-    [Tooltip("제자리 점프 시 Y축 초기 속도 (체공 약 0.55초, 높이 약 0.36)")]
-    [SerializeField] float shortJumpPowerY = 3.0f;
-    [Tooltip("방향키 이동 점프 시 Y축 초기 속도 (체공 약 0.63초, 높이 약 0.49)")]
-    [SerializeField] float longJumpPowerY = 3.5f;
-    // (1)왜 숏/롱을 "버튼 홀드 시간"이 아니라 "방향키 입력 유무"로 분단하나:
-    //   원작 폰포코는 가변 점프가 아니라 "서서 점프=낮게, 뛰면서 점프=높게"다.
-    // (2)물리 근거: v = v0 - g·t, 최고점 t_peak = v0/g, 최고높이 h = v0²/(2g). v0가 3.0이냐 3.5냐에 따라 제곱으로 차이남.
+    [SerializeField] float shortJumpPowerY = 3.0f;  // 제자리 점프 힘
+    [SerializeField] float longJumpPowerY = 3.5f;   // 방향키 누르고 점프 힘
 
     [Header("점프 3단계 중력 (상승 약함 -> 정점 체공 -> 하강 조금 강함)")]
-    // (1)왜 중력을 단계별로 바꾸나: 현실 물리는 중력 일정하지만 게임은 조작감 위해 왜곡한다.
-    //   올라갈 땐 약하게(천천히 뜨고), 정점에선 더 약하게(둥실 체공), 내려올 땐 강하게(후딱 떨어짐).
-    //   마리오 시리즈 대표 기법. "coyote time", "jump buffering"과 함께 쓰임.
-    // (2)구현: FixedUpdate에서 isJumping 중일 때 rb.velocity.y 부호·크기 보고 rb.gravityScale 매 프레임 재대입.
-    //   실제 중력가속도 = Physics2D.gravity.y × gravityScale.
-    [Tooltip("올라갈 때 적용되는 약한 중력")]
+    // ※ gravityScale : Rigidbody2D 에 적용되는 중력 배율 (실제중력 = Physics2D.gravity.y * gravityScale)
+    // (1)점프 구간별로 gravityScale 을 갈아끼워서 "뿅뿅" 하는 아케이드 점프 느낌을 만든다
+    // (2)riseGravity : 올라갈때 약한 중력 / peakHangGravity : 정점 근처 아주 약한 중력(공중에 떠있는 느낌) / fallGravity : 내려올때 조금 센 중력
+    // (3)peakVelocityThreshold : |Y속도| 가 이 값 이하면 "정점 근처"라고 판단하는 기준
     [SerializeField] float riseGravity = 1.35f;
-    [Tooltip("정점 부근(|velocity.y| <= peakVelocityThreshold)에서 둥근 포물선을 만드는 체공 중력")]
     [SerializeField] float peakHangGravity = 0.65f;
-    [Tooltip("내려올 때 적용되는 중력 (상승보다 강하지만 압정에 처박히지 않는 수치)")]
     [SerializeField] float fallGravity = 1.85f;
-    [Tooltip("정점 체공 중력이 적용되는 Y속도 임계값")]
     [SerializeField] float peakVelocityThreshold = 0.8f;
-    // (1)왜 임계값 필요: velocity.y가 정확히 0이 되는 순간은 물리 엔진이 이산적(틱 단위)이라 프레임 하나에
-    //   걸치지 않고 지나쳐버릴 수 있음. 그래서 "0에 가까운 구간"을 ±0.8로 넉넉히 잡아 체공 중력 적용.
 
-    // 스프라이트 상태 전환용 이미지
-    // (1)왜 스프라이트 직접 바꾸나: 달리기/점프/사다리/죽음은 애니메이션 클립으로 처리하지만,
-    //   "서 있을 때(Idle) 정면이냐 측면이냐"는 클립 없이 스프라이트 한 장 갈아끼우기로 구현(아트 절약).
-    // (2)사용 시점: LateUpdate에서 애니메이터 상태가 Idle일 때 방향에 따라 대입.
-    [SerializeField] Sprite frontSprite;   // 정면(사다리 탈 때)
-    [SerializeField] Sprite leftSprite;    // 측면(좌우 이동). 오른쪽은 localScale 반전으로 처리.
+    // Idle 상태일때 애니메이션 대신 직접 끼워넣을 스프라이트 (LateUpdate 참고)
+    [SerializeField] Sprite frontSprite;  // 사다리 탈때 정면 모습
+    [SerializeField] Sprite leftSprite;   // 평소 옆모습(왼쪽 기준, 오른쪽은 localScale 뒤집기로 처리)
 
     [Header("5개 층 Y좌표 분기 기준값 (현재 맵 좌표 적용 완료)")]
-    // (1)의미: 폰포코 맵은 5층. 사망 위치 Y좌표로 "몇 층에서 죽었나" 판정 → 층별 사망 음원(Death1~5) 재생.
-    // (2)판정 로직: GetCurrentFloorByY()에서 위(5층)부터 차례로 비교. 순서 바꾸면(1층부터) 전부 1층으로 나옴.
-    // (3)주의: 이 값들은 현재 맵 월드 좌표에 종속적. 맵을 위아래로 옮기면 이 값들도 같이 옮겨줘야 함.
-    [SerializeField] float floor5MinY = 0.76f;  // 5층 기준 Y좌표
-    [SerializeField] float floor4MinY = -0.20f; // 4층 기준 Y좌표
-    [SerializeField] float floor3MinY = -1.16f; // 3층 기준 Y좌표
-    [SerializeField] float floor2MinY = -2.12f; // 2층 기준 Y좌표
-    [SerializeField] float firstFloorY = -2.60f; // 1층 맨 아래 바닥 Y좌표 (추락사 최종 도착점)
+    // (1)플레이어 Y좌표가 이 값보다 크거나 같으면 해당 층으로 판정 (GetCurrentFloorByY 참고)
+    // (2)맵을 수정해서 층 높이가 바뀌면 이 값들을 다시 맞춰줘야 한다. 확인법 : 사망시 콘솔에 찍히는 "사망 Y좌표" 로그를 보고 조정
+    [SerializeField] float floor5MinY = 0.76f;
+    [SerializeField] float floor4MinY = -0.20f;
+    [SerializeField] float floor3MinY = -1.16f;
+    [SerializeField] float floor2MinY = -2.12f;
+    [SerializeField] float firstFloorY = -2.60f;   // 추락 사망시 떨어져서 멈출 1층 바닥 Y
 
     [Header("각 층별(1층~5층) 사망 MP3 오디오 클립 (Death1 ~ Death5)")]
-    // (1)왜 층별 음원 다르나: 원작은 높은 층에서 떨어질수록 비명이 길다. 추락사 시 "떨어지는 시간 = 음원길이 - 마지막 충돌음길이"
-    //   로 맞춰서 바닥 부딪히는 순간과 MP3 끝의 "콰직!"이 정확히 일치하게 동기화.
-    // (2)주의: AudioClip은 리소스 참조일 뿐 재생은 AudioSource(source)가 함. null이면 over(기본음)로 폴백.
-    [SerializeField] AudioClip floor1Clip; // Death1 (제자리 사망 및 1층 사망 시 재생)
-    [SerializeField] AudioClip floor2Clip; // Death2 (2층 추락 시 재생)
-    [SerializeField] AudioClip floor3Clip; // Death3 (3층 추락 시 재생)
-    [SerializeField] AudioClip floor4Clip; // Death4 (4층 추락 시 재생)
-    [SerializeField] AudioClip floor5Clip; // Death5 (5층 추락 시 재생)
+    [SerializeField] AudioClip floor1Clip;
+    [SerializeField] AudioClip floor2Clip;
+    [SerializeField] AudioClip floor3Clip;
+    [SerializeField] AudioClip floor4Clip;
+    [SerializeField] AudioClip floor5Clip;
 
     [Header("추락 사운드 & 애니메이션 조절")]
-    [Tooltip("MP3 파일 맨 끝에 들어있는 '콰직!' 충돌음의 길이(초). MP3 전체 길이에서 이 값을 뺀 시간 동안 낙하하여 바닥 충돌과 '콰직!' 소리를 정확히 일치시킴")]
-    [SerializeField] float crashSoundDuration = 0.45f;
-    [Tooltip("추락사 시 빙빙 도는 애니메이션의 회전 속도 및 횟수 배수 (기본 2.0 = 2배 빠르게 회전)")]
-    [SerializeField] float deathSpinMultiplier = 2.0f;
+    [SerializeField] float crashSoundDuration = 0.45f;  // 사운드 끝부분 "쿵" 소리 길이(이만큼 빼고 낙하시간 계산)
+    [SerializeField] float deathSpinMultiplier = 2.0f;  // 추락중 death 애니메이션 회전 배율
 
-    [Tooltip("체크하면 위층에서 fall로 떨어질 때 중간 층을 통과해 맨 아래 1층 바닥까지 추락함")]
-    [SerializeField] bool fallToFirstFloor = true;
+    [SerializeField] bool fallToFirstFloor = true;      // (현재 코드에선 사용 안함 - 나중에 옵션 만들때 쓰려고 남겨둔 변수)
 
-    // 입력 및 상태 체크 변수들
-    // (1)왜 이것들은 [SerializeField] 안 붙이나: 에디터서 조절할 세팅값이 아니라 게임 돌아가는 동안 계속 바뀌는 상태값이라 노출할 이유 없음.
-    // (2)이 변수들이 바로 "상태 머신(State Machine)"의 상태다. isJumping, ladderTrigger, isDead 등 조합으로 플레이어 상태 표현.
-    float axisH = 0f;   // Input.GetAxisRaw("Horizontal") 결과. -1/0/1만 가짐(가속 없이 즉시 최대치).
-    float axisV = 0f;   // Input.GetAxisRaw("Vertical") 결과. 사다리 오르내리기에만 씀.
+    // ------------------------------------------------------------------
+    // 3.입력/상태 변수
+    // ------------------------------------------------------------------
+    float axisH = 0f;   // 좌우 입력값 (-1, 0, 1)
+    float axisV = 0f;   // 상하 입력값 (-1, 0, 1)
 
-    // (1)enum(열거형): 상수들을 묶어 의미 있는 이름으로 쓰는 자료형. int 0,1,2로 쓰면 "0이 뭐였지" 헷갈리니 이름 붙인 것.
-    // (2)왜 private: 이 방향 상태는 이 스크립트 안에서만 쓰니까.
+    // ※ enum(열거형) : 정해진 값들만 가질 수 있는 자료형. bool 은 2가지뿐인데 상태가 3개 이상일때 쓴다
+    // (1)여기선 "지금 어느쪽 보고있나" 를 Front(정면,사다리) / Left / Right 로 구분
+    // (2)private enum 이라서 이 클래스 안에서만 쓸 수 있다
     private enum FacingState { Front, Left, Right }
-    private FacingState currentFacing = FacingState.Left;  // 게임 시작 시 왼쪽 보고 서 있음.
+    private FacingState currentFacing = FacingState.Left;
 
-    bool onGround = false;     // 발 밑에 바닥 닿아있는가 (점프 가능 조건)
-    bool ladderTrigger = false;// 사다리 타는 중인가 (중력 0, 상하 이동만)
-    bool isJumping = false;    // 점프 코루틴 도는 중인가
-    bool isStunned = false;    // (현재 안 쓰는 상태. 기절/넉백 연출용으로 남겨둔 플래그)
-    bool isDead = false;       // 사망 상태. true면 Update/FixedUpdate/LateUpdate 전부 early return.
-    bool isLadderTop = false;  // 사다리 꼭대기 트리거 안에 있는가 (위로 더 못 올라가게 막음)
+    // (1)상태 플래그들 : 여러 bool 로 현재상태를 표현 -> Update/FixedUpdate 에서 if 로 분기
+    bool onGround = false;       // 지금 땅에 서있나
+    bool ladderTrigger = false;  // 지금 사다리 "타는 중"인가 (사다리 근처에 있는 것과는 다름)
+    bool isJumping = false;      // 점프 코루틴이 돌고있는가
+    bool isStunned = false;      // 경직 상태 (현재 코드에선 true 로 바꾸는 곳 없음, 확장용)
+    bool isDead = false;         // 죽었나 (true면 대부분의 로직 return)
+    bool isLadderTop = false;    // 사다리 꼭대기 트리거 안에 있나
 
-    // 사다리 범위 감지 및 현재 사다리 정중앙 X좌표, 점프 시작 높이 저장 변수
-    bool isNearLadder = false;     // 사다리 트리거(ladder 태그) 안에 서 있는가
-    float ladderCenterX = 0f;      // 지금 사다리 정중앙 X좌표. 사다리 타면 이 X로 스냅(고정).
-    float jumpStartY = 0f;         // 점프 시작 순간 Y좌표. 착지 판정·위층 트랩 예외에 씀.
+    bool isNearLadder = false;   // 사다리 트리거 범위 안에 있나 (아직 타는건 아님)
+    float ladderCenterX = 0f;    // 사다리 중앙 X좌표 (탈때 이 X로 스냅시킴)
+    float jumpStartY = 0f;       // 점프 시작한 Y높이 (사다리 구멍 착지 보정, 윗층 함정 판정에 사용)
 
-    // 오디오 소스 및 클립
-    [SerializeField] AudioClip walk;  // 걷는 발걸음 소리 (반복)
-    [SerializeField] AudioClip jump;  // 점프 시 "퐁" 소리
-    [SerializeField] AudioClip over;  // 기본 사망음 (층별 클립 null일 때 폴백)
-    AudioSource source;               // 실제 소리 재생 컴포넌트. Start에서 캐싱.
+    // ★ [버그수정] 사다리 텔레포트 방지용 상태 변수
+    // (1)원인 : 사다리 2개가 가까이 있을때 트리거가 번갈아 발동하면서 ladderCenterX 가 바뀌고,
+    //          FixedUpdate 의 rb.position X스냅 때문에 즉시 옆 사다리로 순간이동했음
+    // (2)해결 : "지금 감지중인 사다리"를 기억해두고(currentLadderCollider) 타는 중엔 다른 사다리를 무시
+    Collider2D currentLadderCollider = null;  // 지금 감지 중인(가장 가까운) 사다리 콜라이더
+    int ladderTopOverlapCount = 0;             // 꼭대기 트리거 중첩 카운터
+    [Tooltip("사다리 꼭대기 트리거 범위 판정 시 가로 여유(유닛). 기본 0.1")]
+    [SerializeField] float ladderTopMatchMargin = 0.1f;
 
-    // 라이프(목숨) UI 관리 컴포넌트 참조
-    // (1)FindObjectOfType<T>(): 씬 전체 뒤져 T 타입 컴포넌트 가진 오브젝트 하나 찾아줌. Start에서 딱 한 번만 호출해 캐싱.
-    // (2)주의: 이 메소드는 씬 순회라 무겁다. 매 프레임 부르면 절대 안 됨. 같은 타입이 씬에 2개 이상이면 "어떤 게 올지 보장 없음".
-    // (3)참고: 클래스명 "gruopLayoutUI"는 "group" 오타로 보임. 기존 코드 유지.
-    gruopLayoutUI life;
+    // ★ 사다리 하강 시 바닥 접촉 판정용
+    // (1)ladderGroundContactGap : 발바닥-바닥 사이 간격이 이 값 이하일때만 "바닥에 닿았다" 고 보고 사다리를 해제
+    // (2)너무 작으면(0.03 등) 측정 오차때문에 영영 해제가 안될 수 있고, 너무 크면 공중에서 일찍 해제돼서 뚝 떨어진다
+    // (3)주의 : 인스펙터에 예전 값(0.03)이 저장돼있으면 코드값이 안먹으니 인스펙터에서 0.05로 직접 바꿀것
+    [SerializeField] float ladderGroundContactGap = 0.05f;  // 발-바닥 간격이 이 값 이하일 때만 사다리 해제
+    // (4)ladderExitArmed : 사다리 "탑승 직후" 에는 발밑이 바로 윗층 바닥이라 간격=0 -> 타자마자 해제되는 문제 방지용 안전핀
+    //    한번 발이 바닥에서 떨어져야(간격 큼) true 가 되고, 그 이후부터 해제 판정을 한다
+    bool ladderExitArmed = false;                            // 탑승 직후 발밑 바닥(상단 층)에 의한 즉시 해제 방지
+    // (5)ladderStuckTimer/ladderLastY : "아래키를 누르는데 위치가 안변한다" = 바닥에 막혔다 로 보고 강제 해제하는 안전장치용
+    float ladderStuckTimer = 0f;                             // 내려가려는데 안 움직이는 시간 (바닥에 막힘 감지용)
+    float ladderLastY = 0f;
 
-    // Start() — 오브젝트 활성화된 첫 프레임 직전에 딱 한 번 호출.
-    // (1)하는 일: 필요 컴포넌트 전부 캐싱 + 초기 물리 상태 세팅.
-    // (2)왜 Start에서 찾나: Awake는 씬 로딩 직후라 다른 오브젝트가 아직 준비 안 됐을 수 있고, Start는 첫 Update 직전이라
-    //   씬의 모든 오브젝트가 준비된 게 보장됨.
+    [SerializeField] AudioClip walk;
+    [SerializeField] AudioClip jump;
+    [SerializeField] AudioClip over;   // 기본 사망음(층별 클립이 비어있을때 대체용)
+    AudioSource source;
+
+    gruopLayoutUI life;   // 목숨 UI 스크립트 (클래스 이름 오타 gruop 그대로 - 바꾸면 UI 스크립트도 같이 바꿔야 함)
+
     void Start()
     {
-        // GetComponent<T>(): "이 스크립트가 붙은 오브젝트"에서 T 타입 컴포넌트 찾아옴.
-        // (1)같은 오브젝트에 붙은 것만 찾음. 다른 오브젝트꺼는 Find나 FindObjectOfType으로.
-        // (2)해당 컴포넌트 없으면 null 리턴되고 나중에 NullReferenceException 터짐. 인스펙터에서 미리 붙여놔야 함.
+        // ※ GetComponent<T>() : 이 스크립트가 붙은 "같은 게임오브젝트" 에서 컴포넌트를 찾아온다
+        // (1)주의 : 해당 컴포넌트가 오브젝트에 없으면 null 이 되어서 아래에서 NullReferenceException 에러 발생
         source = GetComponent<AudioSource>();
         rb = GetComponent<Rigidbody2D>();
         anim = GetComponent<Animator>();
         sp = GetComponent<SpriteRenderer>();
         col = GetComponent<Collider2D>();
 
-        life = FindObjectOfType<gruopLayoutUI>();  // 씬에 하나뿐인 목숨 UI 찾아 캐싱
+        // ※ FindObjectOfType<T>() : 씬 전체에서 해당 타입의 오브젝트를 하나 찾는다
+        // (1)GetComponent 와 차이 : GetComponent 는 내 오브젝트 안에서, FindObjectOfType 은 씬 전체에서 찾음 (느리니까 Start 에서 한번만)
+        // (2)참고 : 최신 유니티(2023+)에선 FindFirstObjectByType 으로 대체되는 추세 (지금은 경고만 뜸)
+        life = FindObjectOfType<gruopLayoutUI>();
 
-        rb.gravityScale = fallGravity;   // 기본 중력은 하강용 중력으로. 평소 걷는 상태는 하강이 기본.
-        anim.speed = 1f;                 // 애니메이터 재생 속도 1배수. (점프 중엔 0으로 만들어 프레임 수동 조작)
+        rb.gravityScale = fallGravity;   // 평소 중력 배율 = 하강 중력
+        anim.speed = 1f;                 // 애니메이션 재생속도 정상(0이면 일시정지)
     }
 
-    // Update() — 매 프레임 호출 (FPS에 따라 횟수 달라짐).
-    // (1)주로 하는 일: 입력 처리(Input) + 애니메이터 파라미터 세팅 + 상태 전환 판정. 물리는 FixedUpdate에서.
-    // (2)왜 입력은 Update에서 받나: Input.GetButtonDown/GetKeyDown은 "그 프레임에 눌린 순간"을 감지하는데,
-    //   FixedUpdate는 50Hz라 "눌렀다 떼진" 순간을 놓칠 수 있음. 그래서 입력은 매 프레임 도는 Update에서 받아야 함.
     void Update()
     {
-        // 실제 바닥 레이어 감지
-        // Physics2D.Linecast(시작점, 끝점, 레이어마스크): 두 점 잇는 선분 상에 지정 레이어 콜라이더 있으면 true.
-        // (1)시작점: transform.position (캐릭터 중심, pivot 기준)
-        // (2)끝점: 중심에서 아래로 0.3유닛 지점. "발 밑 0.3유닛 선분" 안에 바닥 있나 봄.
-        //   0.3은 발 크기보다 약간 커야 바닥에 살짝 붙어있을 때도 true. 너무 짧으면 계단 오를 때 붕 뜬다고 오판.
-        // (3)왜 Raycast 아니라 Linecast: Linecast는 "두 점 사이"를 보는 거라 발 길이만큼 정확히 끊어서 볼 수 있고,
-        //   Raycast는 "시점에서 무한정 뻗는 광선"이라 거리 제한을 별도로 줘야 함. 여기선 Linecast가 직관적.
+        // ==============================================================
+        // 1.바닥 감지
+        // ※ Physics2D.Linecast(시작점, 끝점, 레이어마스크)
+        // (1)의미 : 시작점~끝점을 잇는 "선분" 위에 콜라이더가 있으면 true 를 돌려줌 (bool 형 반환으로 쓸때)
+        // (2)Raycast 와 차이 : Raycast 는 (시작점, 방향, 거리) / Linecast 는 (시작점, 끝점) -> 둘 다 같은 원리
+        // (3)transform.position - transform.up * 0.3f : 내 위치에서 아래쪽으로 0.3 유닛 (transform.up 은 내 위쪽방향 벡터, 벡터 시트 11번 참고)
+        // (4)주의 : transform.position(피벗) 에서 쏘기 때문에 피벗이 발바닥이 아니면 0.3 이 짧거나 길 수 있다
+        // ==============================================================
         bool hitGround = Physics2D.Linecast(transform.position, transform.position - (transform.up * 0.3f), groundLayer);
 
-        // 점프 중일 때는 공중의 사다리에 닿아도 착지로 오판하지 않고,
-        // 실제 바닥에 닿았거나 점프를 시작했던 바닥 높이(jumpStartY)까지 완전히 내려왔을 때만 착지로 판정
-        // (1)왜 이렇게 복잡하나: 사다리 있는 자리는 바닥에 구멍(사다리 통과구)이 뚫려있음.
-        //   걸어갈 때 Linecast는 구멍 통해 아래가 뚫려있어서 false 리턴 → 플레이어가 갑자기 아래로 빠짐.
-        //   그걸 막기 위해 "사다리 근처이고 사다리 안 타고 있으면 바닥으로 쳐준다"는 예외 규칙을 둠.
-        // (2)점프 중일 땐 반대로 "사다리 구멍 지나 내려올 때" 바닥으로 오판하면 안 되니,
-        //   실제 바닥에 닿았거나(hitGround) 점프 시작 높이까지 내려왔을 때만 착지로 침.
         if (isJumping)
         {
+            // 점프중 : 사다리 구멍(바닥이 없는 구간) 위로 점프했다가 시작높이로 돌아오면 "착지" 로 인정
+            // (1)바닥 콜라이더가 없는 사다리 구멍에서도 점프가 끝날 수 있게 하는 보정
             bool landedOnLadderGap = (isNearLadder || isLadderTop) && (rb.velocity.y <= 0f) && (transform.position.y <= jumpStartY + 0.02f);
             onGround = hitGround || landedOnLadderGap;
         }
         else
         {
-            // 걸어 다닐 때는 사다리 위쪽 구멍을 지나갈 때도 바닥으로 판정하여 아래로 빠지지 않게 유지
+            // 평소 : 바닥에 닿았거나, 사다리 근처인데 아직 안탔으면 땅으로 취급
             onGround = hitGround || ((isNearLadder || isLadderTop) && !ladderTrigger);
         }
 
-        // 사망 시 조기 리턴 (early return). 죽은 캐릭터가 입력 받거나 애니메이션 바꾸면 안 되니까.
-        // Die()는 한 번만 호출되지만 Update는 계속 도니까 매번 체크해서 사망 연출이 깨지지 않게 함.
-        if (isDead) return;
+        if (isDead) return;   // 죽었으면 입력 처리 전부 중단 (※ 가드 클로즈: 조건 맞으면 일찍 return 해서 아래 코드 실행 막기)
 
+        // 애니메이션용 접지 상태 (점프중엔 false 로 -> 점프 애니메이션이 나오게)
         bool isAnimationGrounded = onGround && (!isJumping || isStunned);
-        anim.SetBool("IsGrounded", isAnimationGrounded);  // "서 있음"을 애니메이터에 알려 Idle/달리기로 전환.
+        anim.SetBool("IsGrounded", isAnimationGrounded);
 
-        axisH = Input.GetAxisRaw("Horizontal");  // GetAxisRaw는 -1/0/1 세 값만 가짐(가속 없이 즉시 최대치).
-        axisV = Input.GetAxisRaw("Vertical");    // GetAxis는 0~1 사이 부드러운 값. 차이 알아둘 것.
+        // ==============================================================
+        // 2.입력 받기
+        // ※ Input.GetAxisRaw("Horizontal") vs Input.GetAxis("Horizontal")
+        // (1)GetAxisRaw : -1, 0, 1 중 하나로 딱딱 떨어짐 (가속/감속 없음) -> 아케이드 게임에 적합
+        // (2)GetAxis : -1~1 사이로 부드럽게 변함(스무딩)
+        // ※ Input.GetKeyDown(키) : 키를 "누른 그 프레임" 에만 true (꾹 눌러도 한번만) / GetKey 는 누르고있는 동안 계속 true
+        // ※ Input.GetButtonDown("Jump") : 키를 직접 지정하지 않고 Project Settings > Input Manager 에 등록된 이름("Jump")으로 받는다 (기본은 스페이스)
+        // ==============================================================
+        axisH = Input.GetAxisRaw("Horizontal");
+        axisV = Input.GetAxisRaw("Vertical");
 
-        // 1. 사다리 범위 안에서 W/윗화살표(또는 꼭대기에서 S/아랫화살표)를 누르면 사다리 정중앙으로 스냅 후 탑승
-        // (1)탑승하는 순간 하는 일: ladderTrigger=true(상태전환) → X를 사다리 정중앙으로 스냅 → velocity=0(관성 방지) → 정면 스프라이트.
+        // ==============================================================
+        // 3.사다리 탑승 처리
+        // (1)조건 : 사다리 범위 안 + 아직 안탔음 + 점프/경직 아님
+        // (2)위/아래 키를 "누르는 순간" 탑승
+        // (3)꼭대기에서 아래키 = 위층에서 사다리로 내려가는 탑승
+        // ==============================================================
         if ((isNearLadder || isLadderTop) && !ladderTrigger && !isJumping && !isStunned)
         {
             bool pressUp = Input.GetKeyDown(KeyCode.W) || Input.GetKeyDown(KeyCode.UpArrow) || Input.GetKeyDown(KeyCode.S) || Input.GetKeyDown(KeyCode.DownArrow);
@@ -201,67 +228,91 @@ public class playerController : MonoBehaviour
 
             if (pressUp || pressDownAtTop)
             {
+                // [버그수정] 탑승 직전 현재 사다리 콜라이더 기준으로 중앙 X 재계산
+                if (currentLadderCollider != null) ladderCenterX = GetLadderCenterX(currentLadderCollider);
+
                 ladderTrigger = true;
+                ladderExitArmed = false;   // ★ 추가 : 탑승할때마다 안전핀 다시 꽂기
+                ladderStuckTimer = 0f;
+                ladderLastY = transform.position.y;
+                // 사다리 중앙 X로 이동(Y,Z는 그대로) -> 사다리 한가운데 정렬
+                // ※ transform.position 은 Vector3 라서 x만 단독으로 못바꾼다 -> new Vector3 로 통째로 대입 (벡터 시트 12번 참고)
                 transform.position = new Vector3(ladderCenterX, transform.position.y, transform.position.z);
                 rb.velocity = Vector2.zero;
                 currentFacing = FacingState.Front;
             }
         }
 
-        // 2. 사다리 꼭대기(isLadderTop)나 맨 아래 바닥(hitGround)에서 탈출 조건 처리
-        // (1)탈출 조건1: 꼭대기나 맨 아래 바닥에서 좌우 방향키 누름 → 옆으로 빠져나감
-        // (2)탈출 조건2: 맨 아래 바닥에 서 있고 위로 안 올라감(axisV<=0) → 그냥 내려놓음
+        // ==============================================================
+        // 4.사다리 타는 중 해제 판정
+        // (1)옆키를 누르면 : 꼭대기에 있거나, 발이 바닥에 닿았을때만 사다리에서 내려서 걸어간다 (사다리 중간에선 옆으로 못나감)
+        // (2)발이 바닥에 닿았고 위키를 안누르면 : 사다리 해제
+        // ==============================================================
         if (ladderTrigger)
         {
-            if (Mathf.Abs(axisH) > 0.1f && (isLadderTop || (hitGround && axisV <= 0.1f)))
+            bool feetOnGround = IsFeetOnGroundForLadder();
+            bool wantsSide = Mathf.Abs(axisH) > 0.1f;
+
+            if (wantsSide && (isLadderTop || (feetOnGround && axisV <= 0.1f)))
             {
                 ExitLadderToGround();
             }
-            else if (hitGround && axisV <= 0.0f)
+            else if (feetOnGround && axisV <= 0.0f)
             {
                 ExitLadderToGround();
             }
         }
 
-        // 바라보는 방향(스프라이트 반전) 처리.
-        // (1)왜 localScale.x를 -1로 만드나: 스프라이트를 "좌우 반전"시키는 가장 간단한 방법.
-        //   오른쪽 이미지 따로 안 만들어도 왼쪽 스프라이트 하나로 좌우 커버. (SpriteRenderer.flipX 프로퍼티도 있지만 여기선 scale 방식 사용)
-        // (2)조건: 점프 중도 아니고 기절도 아닐 때만 방향 바꿈. 점프 중엔 방향 고정이니까.
+        // ==============================================================
+        // 5.좌우 방향 전환 (스프라이트 뒤집기)
+        // ※ transform.localScale = new Vector2(-1, 1) : X스케일을 -1 로 하면 이미지가 좌우반전된다
+        // (1)스프라이트를 좌/우 두 장 만들 필요없이 한 장(왼쪽기준)으로 뒤집어서 쓰는 방식 (Right = -1, Left = 1)
+        // (2)주의 : 자식 오브젝트(콜라이더, 무기 등)도 같이 뒤집힌다 / SpriteRenderer.flipX 로도 가능하지만 자식은 안뒤집힘
+        // ==============================================================
         if (!isJumping && !isStunned)
         {
             if (!ladderTrigger)
             {
                 if (axisH > 0.0f)
                 {
-                    transform.localScale = new Vector2(-1, 1);  // 오른쪽 볼 땐 스프라이트 반전
+                    transform.localScale = new Vector2(-1, 1);
                     currentFacing = FacingState.Right;
                 }
                 else if (axisH < 0.0f)
                 {
-                    transform.localScale = new Vector2(1, 1);   // 왼쪽 볼 땐 원본 그대로
+                    transform.localScale = new Vector2(1, 1);
                     currentFacing = FacingState.Left;
                 }
             }
             else if (Mathf.Abs(axisV) > 0.1f)
             {
-                currentFacing = FacingState.Front;  // 사다리 타며 위아래 누르면 정면으로
+                currentFacing = FacingState.Front;   // 사다리에서 오르내리면 정면
             }
         }
 
-        // 점프 중이거나 기절 중이면 달리기 애니메이션 끄고 이번 프레임 종료(return). 입력·점프 판정 스킵.
         if (isJumping || isStunned)
         {
             anim.SetBool("IsRunning", false);
-            return;
+            return;   // 점프/경직중엔 아래 달리기, 점프시작 처리 안함
         }
 
-        bool isRunning = Mathf.Abs(axisH) > 0.1f && !ladderTrigger;  // 좌우 입력 있고 사다리 안 타면 달리는 중
-        anim.SetBool("IsRunning", isRunning);       // 달리기 ↔ Idle 전환
-        anim.SetBool("IsClimbing", ladderTrigger);  // 사다리 타는 중이면 Climb 애니메이션으로
+        // ==============================================================
+        // 6.애니메이션 파라미터 갱신 (애니메이터 시트 3번 참고)
+        // (1)IsRunning : 좌우입력 있고 사다리 안탔을때
+        // (2)IsClimbing : 사다리 타는 중
+        // ==============================================================
+        bool isRunning = Mathf.Abs(axisH) > 0.1f && !ladderTrigger;
+        anim.SetBool("IsRunning", isRunning);
+        anim.SetBool("IsClimbing", ladderTrigger);
 
-        // 걷기 소리: 달리는 중이고 바닥에 있고 소리 안 나고 있을 때만 재생.
-        // (1)source.isPlaying 체크: PlayOneShot은 중첩 재생되니 매 프레임 부르면 소리가 수백 겹으로 겹침.
-        //   "지금 재생 중이 아니면" 한 번만 틀게 함. (2)달리기 멈추면 소리도 Stop.
+        // ==============================================================
+        // 7.걷는 소리
+        // ※ AudioSource.PlayOneShot(clip) vs Play()
+        // (1)PlayOneShot : 기존 재생을 끊지 않고 겹쳐서 한번 재생 (효과음용)
+        // (2)Play : AudioSource 에 지정된 clip 을 재생 (이미 재생중이면 처음부터 다시)
+        // (3)source.isPlaying 으로 "재생중이 아닐때만" PlayOneShot 해서 발소리가 겹쳐 뭉개지는걸 방지
+        // (4)멈추면 source.Stop() 으로 즉시 끊는다
+        // ==============================================================
         if (!isJumping)
         {
             if (isRunning && onGround && !source.isPlaying)
@@ -274,144 +325,183 @@ public class playerController : MonoBehaviour
             }
         }
 
+        // ClimbSpeed : 사다리에서 움직일때만 애니메이션이 재생되게 (|axisV| 가 0이면 애니메이션 속도 0)
+        // ※ SetFloat : 애니메이터의 float 파라미터 값 설정. 블렌드트리나 Transition 조건/Speed 파라미터 연결에 사용
         if (ladderTrigger)
         {
-            anim.SetFloat("ClimbSpeed", Mathf.Abs(axisV));  // 위아래 입력 크기 넣어줌. 0이면 애니메이션 정지.
+            anim.SetFloat("ClimbSpeed", Mathf.Abs(axisV));
         }
 
-        // 점프 입력. Input.GetButtonDown("Jump"): "이번 프레임에 점프 버튼이 막 눌렸을 때" true.
-        // (1)Input Manager의 "Jump" 축에 매핑된 키(기본 스페이스바). 누르고 있으면 매 프레임 true가 되는 게 아니라
-        //   "처음 누른 그 프레임"만 true라서 점프가 한 번만 됨.
-        // (2)조건: 땅에 붙어있고(onGround) 사다리 안 타는 중 — 사다리 위에선 점프 불가.
-        // (3)점프는 코루틴으로 구현. 코루틴 써야 "점프 전 과정을 한 로직으로 추적"하며 매 FixedUpdate마다
-        //   애니메이션 프레임을 동기화할 수 있음.
+        // 점프 시작 : 점프키 + 땅 + 사다리 안탐
+        // ※ StartCoroutine(메소드()) : 코루틴 메소드 호출 (코루틴 시트 0번 참고)
         if (Input.GetButtonDown("Jump") && onGround && !ladderTrigger)
         {
             StartCoroutine(PonpokoJumpRoutine());
         }
     }
 
-    // FixedUpdate() — 물리 틱(기본 50Hz)마다 호출. FPS와 무관.
-    // (1)하는 일: 오직 "물리(Rigidbody2D velocity, gravityScale)"만 건드림.
-    //   물리는 일정 간격으로 시뮬레이션돼야 "프레임 떨어져도 똑같이 움직"이니까 여기서 함.
-    // (2)왜 Update에서 velocity 안 바꾸나: Update는 FPS에 따라 호출 횟수 들쭉날쭉해서 거기서 속도 바꾸면
-    //   고사양에선 빨리, 저사양에선 느리게 움직임.
+    // ==================================================================
+    // ※ FixedUpdate : 물리엔진과 같은 주기(기본 0.02초)로 호출됨
+    // (1)Rigidbody 의 velocity, gravityScale 등 물리값은 여기서 처리한다
+    // (2)Update 에서 axisH, axisV 를 받아두고 여기서 사용하는 패턴 (입력은 Update, 물리는 FixedUpdate)
+    // ==================================================================
     void FixedUpdate()
     {
-        if (isDead) return;  // 사망 중이면 물리도 스킵 (Die()에서 이미 중력 0으로 만들었음)
+        if (isDead) return;
 
-        // 점프 중 3단계 중력 제어: 상승(약함) -> 정점 부근(체공) -> 하강(강함)
-        // (1)왜 매 FixedUpdate마다 대입하나: gravityScale은 계속 유지되는 값이지만 점프 중엔 velocity.y가
-        //   계속 변하니 "지금 몇 단계인지"를 매번 재판정해서 바꿔줘야 함.
-        // (2)return: 점프 중이면 아래(사다리/걷기) 물리 로직은 스킵. 점프 코루틴이 velocity를 직접 관리하기 때문.
+        // ---------------- 점프중 : 구간별 중력 교체 ----------------
+        // (1)|Y속도| <= 임계값 : 정점 근처 -> 아주 약한 중력(떠있는 느낌)
+        // (2)Y속도 > 0 : 상승중 -> 약한 중력 / 그외 : 하강중 -> 조금 센 중력
+        // (3)X속도는 코루틴(PonpokoJumpRoutine)에서 고정시켜주므로 여기선 중력만 건드림
         if (isJumping)
         {
             if (Mathf.Abs(rb.velocity.y) <= peakVelocityThreshold)
             {
-                rb.gravityScale = peakHangGravity;  // 정점 부근: 체공 중력(가장 약함)
+                rb.gravityScale = peakHangGravity;
             }
             else if (rb.velocity.y > 0f)
             {
-                rb.gravityScale = riseGravity;      // 상승 중: 약한 중력
+                rb.gravityScale = riseGravity;
             }
             else
             {
-                rb.gravityScale = fallGravity;      // 하강 중: 강한 중력
+                rb.gravityScale = fallGravity;
             }
             return;
         }
 
-        if (isStunned) return;  // 기절 중도 물리 스킵 (현재 isStunned은 항상 false라 사실상 안 씀)
+        if (isStunned) return;
 
+        // ---------------- 사다리 타는 중 ----------------
         if (ladderTrigger)
         {
-            // 사다리 타는 중 물리: 중력 0, 이동은 오직 상하로만, X좌표는 사다리 중앙에 고정.
-            rb.gravityScale = 0f;  // 사다리 타는 중엔 중력 작용하면 안 됨
+            rb.gravityScale = 0f;   // 사다리 위에선 중력 OFF (안그러면 미끄러져 내려감)
             float currentLadderSpeed = ladderSpeed;
 
+            // 꼭대기에서 위키를 누르면 더 못올라가게 속도 0
             if (isLadderTop && axisV > 0f)
             {
-                currentLadderSpeed = 0f;  // 꼭대기에서 위로는 못 올라감
+                currentLadderSpeed = 0f;
             }
 
-            rb.velocity = new Vector2(0f, axisV * currentLadderSpeed);  // X는 0 강제, Y는 입력×속도
-            rb.position = new Vector2(ladderCenterX, rb.position.y);    // X를 사다리 중앙에 계속 덮어씀 → 이탈 방지
+            float vy = axisV * currentLadderSpeed;
 
-            // 사다리를 타고 내려오는 중 실제 바닥에 도달하면 즉시 사다리 탈출 및 밀착
-            // footOffset: 콜라이더 중심에서 발바닥까지 거리. BoxCollider2D면 정확히 계산.
-            float footOffset = 0.25f;  // 기본값 (콜라이더 없을 경우 대비)
-            BoxCollider2D boxCol = col as BoxCollider2D;  // (1)as 캐스팅: col이 BoxCollider2D면 변환, 아니면 null.
-            if (boxCol != null) footOffset = boxCol.size.y * 0.5f - boxCol.offset.y;
-            // (1)계산식: BoxCollider2D 세로 절반(size.y*0.5)에서 offset.y 빼면 "중심에서 발바닥까지 거리" 나옴.
+            // ★ 안전장치: 내려가려는데(armed 상태) 위치가 거의 안 변하면 바닥에 막힌 것 -> 사다리 해제
+            // (1)movedY : 지난 FixedUpdate 때 Y - 지금 Y (양수면 아래로 내려간 것)
+            // (2)0.0005 보다 적게 움직인 시간이 0.08초 쌓이면 "막혔다" 고 판단
+            // (3)Time.fixedDeltaTime : FixedUpdate 한번의 시간간격(기본 0.02초). FixedUpdate 안에선 Time.deltaTime 도 같은 값이지만 fixedDeltaTime 이 의미상 정확
+            if (axisV < 0f && ladderExitArmed)
+            {
+                float movedY = ladderLastY - rb.position.y;
+                if (movedY < 0.0005f) ladderStuckTimer += Time.fixedDeltaTime;
+                else ladderStuckTimer = 0f;
 
-            RaycastHit2D downHit = Physics2D.Raycast(transform.position, Vector2.down, footOffset + 0.2f, groundLayer);
-            if (axisV <= 0f && downHit.collider != null)  // 내려가는 중이고 발 밑에 바닥 감지되면 탈출
+                if (ladderStuckTimer >= 0.08f)
+                {
+                    ladderStuckTimer = 0f;
+                    ExitLadderToGround();
+                    return;
+                }
+            }
+            else
+            {
+                ladderStuckTimer = 0f;
+            }
+            ladderLastY = rb.position.y;
+
+            // ★ 내려갈 때 바닥을 뚫거나 크게 스냅되지 않도록, 남은 거리만큼만 이동
+            // (1)속도 = 거리 / 시간 이므로, 한 프레임에 gap(남은거리) 만큼만 내려가게 속도 상한을 건다
+            // (2)maxDown = gap / fixedDeltaTime  ->  vy 는 음수라서 Mathf.Max(vy, -maxDown) 으로 "더 느린쪽" 선택
+            // (3)이 덕분에 바닥에 닿는 순간 순간이동 없이 부드럽게 멈춘다 (원래 텔레포트 버그 해결 포인트)
+            if (vy < 0f && ladderExitArmed)
+            {
+                float gap = GetGroundGapBelowFeet();
+                if (gap < float.MaxValue)
+                {
+                    float maxDown = gap / Time.fixedDeltaTime;
+                    vy = Mathf.Max(vy, -maxDown);
+                }
+            }
+
+            rb.velocity = new Vector2(0f, vy);   // X속도는 0 (사다리에선 좌우로 안움직임)
+            // ※ rb.position vs transform.position
+            // (1)rb.position : 물리엔진 쪽 위치를 직접 지정 (FixedUpdate 에서 물리 오브젝트 위치를 바꿀땐 이쪽이 안전)
+            // (2)transform.position : 트랜스폼 위치 (Update 에서 즉시 이동시킬때)
+            // (3)매 FixedUpdate 마다 X를 사다리 중앙으로 고정 -> ladderCenterX 가 바뀌면 바로 순간이동하니 주의(★텔레포트 버그 원인이었음)
+            rb.position = new Vector2(ladderCenterX, rb.position.y);
+
+            // 아래로 내려가려는 중이 아니고(axisV <= 0) 발이 바닥에 닿았으면 사다리 해제
+            if (axisV <= 0f && IsFeetOnGroundForLadder())
             {
                 ExitLadderToGround();
             }
         }
+        // ---------------- 평지 이동 ----------------
         else
         {
-            // 일반 걷기 상태 물리.
-            // (1)사다리 근처(isNearLadder||isLadderTop)면 중력 0 + Y속도 0 → 사다리 구멍 위에 서 있을 때
-            //   아래로 빨려들어가지 않게 "공중에 살짝 붙잡아주는" 효과. (사다리 구멍은 바닥이 뚫려 Linecast가 false 나오니 이 보정 필요)
-            // (2)평소엔 fallGravity 적용하고 X속도는 axisH×speed로 직접 세팅.
-            //   velocity 직접 세팅 = AddForce보다 조작감 좋음 (관성력 무시 가능).
+            // 사다리 근처(타지는 않음)에선 중력을 꺼서 사다리 구멍에 빠지지 않게 하고 Y속도도 0으로 고정
             rb.gravityScale = (isNearLadder || isLadderTop) ? 0f : fallGravity;
             float targetVelY = (isNearLadder || isLadderTop) ? 0f : rb.velocity.y;
+            // ※ 속도 설정 주의 : velocity 는 x,y 를 따로 못바꾸고 통째로 대입해야 한다 (벡터 시트 12번)
+            //   그래서 Y는 "현재 Y속도 그대로(rb.velocity.y)" 를 넣어서 중력낙하가 유지되게 한다
             rb.velocity = new Vector2(axisH * speed, targetVelY);
         }
     }
 
-    // LateUpdate() — 매 프레임 가장 마지막에 호출.
-    // (1)하는 일: 애니메이터가 이번 프레임에 어떤 상태(클립)를 재생했는지 확정된 뒤에,
-    //   "Idle 상태일 때만" 스프라이트 이미지를 정면/측면으로 갈아끼움.
-    // (2)왜 LateUpdate에서 하나: Update에서 애니메이터 파라미터를 바꾸면 애니메이터는 그 프레임 중간에 상태 전환함.
-    //   "최종적으로 어떤 상태가 재생됐는지"는 LateUpdate 시점에 와야 확정됨. 그래서 스프라이트 교체는 여기서.
+    // ==================================================================
+    // ※ LateUpdate : 모든 Update 가 끝난 뒤 호출됨
+    // (1)애니메이터가 Update 이후에 스프라이트를 바꾸기 때문에, 내가 원하는 스프라이트로 "덮어쓰기" 할땐 LateUpdate 에서 해야 적용된다
+    // (2)Idle 상태일때만 : 정면(사다리)이면 frontSprite, 아니면 leftSprite 로 강제 교체
+    // ※ anim.GetCurrentAnimatorStateInfo(0) : 0번 레이어의 현재 상태 정보. .IsName("Idle") 로 상태 이름 비교
+    // (3)주의 : IsName 은 애니메이터 창의 "상태 이름" 과 철자/대소문자까지 같아야 true
+    // ==================================================================
     void LateUpdate()
     {
         if (isDead) return;
 
-        // anim.GetCurrentAnimatorStateInfo(0): 애니메이터 레이어 0번의 "지금 재생 중인 상태 정보".
-        // state.IsName("Idle"): 지금 재생 중인 클립 이름이 "Idle"인가? (대소문자 주의)
         AnimatorStateInfo state = anim.GetCurrentAnimatorStateInfo(0);
 
         if (!isJumping && state.IsName("Idle"))
         {
             if (currentFacing != FacingState.Front)
             {
-                sp.sprite = leftSprite;   // 측면 보는 서있기 → 측면 스프라이트
+                sp.sprite = leftSprite;
             }
             else
             {
-                sp.sprite = frontSprite;  // 정면 보는 서있기 → 정면 스프라이트
+                sp.sprite = frontSprite;
             }
         }
     }
 
-    // GetLadderCenterX() — 사다리 콜라이더로부터 "사다리 정중앙 X좌표" 계산
-    // (1)왜 필요하나: 사다리 타면 캐릭터를 사다리 줄 정중앙에 스냅시켜야 하는데, 사다리가 "타일맵"으로 만들어져
-    //   있으면 콜라이더 bounds.center가 사다리 전체 중심이 아니라 "타일맵 전체" 중심일 수 있음. 그래서 직접 타일 훑어서 계산.
-    // (2)처리 순서(3가지 케이스 폴백 구조):
-    //   ① Tilemap 컴포넌트 있으면 → 주변 타일 훑어 실제 사다리 타일의 X 범위 구해 중앙 계산
-    //   ② BoxCollider2D가 여러 개(사다리가 여러 줄)면 → 플레이어와 가장 가까운 콜라이더의 중앙 사용
-    //   ③ 그 외(콜라이더 하나)면 → 그냥 bounds.center.x 사용
-    // (3)타일맵 계산 로직: WorldToCell(월드좌표)=월드좌표를 격자좌표(정수)로 변환 / HasTile(셀)=그 칸에 타일 있나 bool
-    //   / GetCellCenterWorld(셀)=그 격자 칸의 월드 중심 좌표 리턴. 플레이어 주변 ±2칸 훑어 minX/maxX 구해 평균 = 중앙.
+    // ==================================================================
+    // ※ 사다리 중앙 X좌표 구하기 (타일맵 / 박스콜라이더 둘 다 대응)
+    // (1)사다리가 Tilemap 으로 만들어졌으면 : 내 위치 주변 셀을 훑어서 타일이 있는 최소/최대 셀의 중앙을 평균
+    // (2)BoxCollider2D 가 여러개 붙어있으면 : 내 X와 가장 가까운 박스의 중앙
+    // (3)그 외 : 콜라이더의 bounds.center.x
+    //
+    // ※ Tilemap 관련 메소드 (타일맵 시트 참고)
+    // (1)tilemap.WorldToCell(월드좌표) : 월드좌표 -> 셀 좌표(Vector3Int, 정수 격자) 변환
+    // (2)tilemap.HasTile(셀좌표) : 그 셀에 타일이 칠해져 있나 (bool)
+    // (3)tilemap.GetCellCenterWorld(셀좌표) : 그 셀의 "중앙" 월드좌표 (Vector3)
+    // (4)Vector3Int : int 3개짜리 벡터 (타일 셀은 소수점이 없으니 Vector3 가 아니라 Int 형 사용)
+    // ==================================================================
     float GetLadderCenterX(Collider2D ladderCol)
     {
-        Tilemap tilemap = ladderCol.GetComponent<Tilemap>();
+        Tilemap tilemap = ladderCol.GetComponent<Tilemap>();   // 타일맵이 아니면 null
         if (tilemap != null)
         {
-            Vector3Int playerCell = tilemap.WorldToCell(transform.position);  // 플레이어가 있는 격자 칸
-            int minX = int.MaxValue;
-            int maxX = int.MinValue;
+            Vector3Int playerCell = tilemap.WorldToCell(transform.position);
+            int minX = int.MaxValue;   // 최소값 찾기 패턴 : 최대로 초기화해두고 더 작은게 나오면 갱신
+            int maxX = int.MinValue;   // 최대값 찾기 패턴 : 최소로 초기화해두고 더 큰게 나오면 갱신
             bool found = false;
 
-            // dy=1(한 칸 위)부터 dy=-1(한 칸 아래)로 훑음. 타일 찾은 행에서 멈춤.
+            // dy : 위(+1) -> 현재(0) -> 아래(-1) 순서로 훑다가 타일을 찾으면 break (가장 가까운 줄 우선)
             for (int dy = 1; dy >= -1; dy--)
             {
-                for (int dx = -2; dx <= 2; dx++)  // 좌우 ±2칸 훑기
+                // [버그수정] 원래 ±2칸(5칸 폭)으로 너무 넓게 훑어 옆 사다리까지 같이 잡음. ±1칸으로 축소.
+                //   (사다리가 가로 3칸 이상 넓다면 이 범위를 다시 ±2로 늘릴 것)
+                for (int dx = -1; dx <= 1; dx++)
                 {
                     Vector3Int checkCell = new Vector3Int(playerCell.x + dx, playerCell.y + dy, playerCell.z);
                     if (tilemap.HasTile(checkCell))
@@ -421,19 +511,20 @@ public class playerController : MonoBehaviour
                         found = true;
                     }
                 }
-                if (found) break;  // 타일 찾은 행에서 멈춤 (가장 가까운 행의 폭을 씀)
+                if (found) break;
             }
 
             if (found)
             {
-                // 양 끝 칸의 월드 중심 좌표 구해서 평균 = 사다리 정중앙 X
                 Vector3 minCenter = tilemap.GetCellCenterWorld(new Vector3Int(minX, playerCell.y, playerCell.z));
                 Vector3 maxCenter = tilemap.GetCellCenterWorld(new Vector3Int(maxX, playerCell.y, playerCell.z));
-                return (minCenter.x + maxCenter.x) * 0.5f;
+                return (minCenter.x + maxCenter.x) * 0.5f;   // 양끝 중앙의 평균 = 사다리 폭의 한가운데
             }
         }
 
-        // 타일맵 아니면 BoxCollider2D 여러 개인지 검사 (사다리가 여러 줄일 수 있음)
+        // ※ GetComponents<T>() (복수형 s) : 같은 타입 컴포넌트가 여러개일때 배열로 전부 가져온다
+        // (1)GetComponent(단수) 는 첫번째 하나만 가져옴
+        // (2)주의 : 배열이 비었을때 [0] 으로 접근하면 IndexOutOfRangeException (디버깅 시트 2번) -> 반드시 .Length 체크
         BoxCollider2D[] boxes = ladderCol.GetComponents<BoxCollider2D>();
         if (boxes.Length > 1)
         {
@@ -442,7 +533,7 @@ public class playerController : MonoBehaviour
             foreach (BoxCollider2D box in boxes)
             {
                 float dist = Mathf.Abs(box.bounds.center.x - transform.position.x);
-                if (dist < minDistance)  // 플레이어와 가장 가까운 사다리 줄의 중앙을 고름
+                if (dist < minDistance)
                 {
                     minDistance = dist;
                     closestX = box.bounds.center.x;
@@ -451,63 +542,123 @@ public class playerController : MonoBehaviour
             return closestX;
         }
 
-        return ladderCol.bounds.center.x;  // 그냥 콜라이더 하나면 그 중심 X를 그대로 씀
+        // ※ collider.bounds : 월드좌표 기준 콜라이더를 감싸는 사각형(Bounds). center / min / max / extents / size 사용 가능
+        return ladderCol.bounds.center.x;
     }
 
-    // [사다리 탈출 함수: 레이 거리를 짧게(0.6f) 제한하여 현재 층 바닥만 정확히 스냅]
-    // (1)왜 필요하나: 사다리에서 그냥 ladderTrigger=false만 하면 중력이 다시 적용되면서 캐릭터가 한 프레임 동안
-    //   살짝 추락해서 "바닥에 툭 떨어지는" 현상 생김. 그래서 아래로 짧은 Raycast 쏴서 "바로 아래 바닥" 찾아
-    //   발 위치를 그 높이에 강제 스냅시켜 부드럽게 착지하게 만듦.
-    // (2)왜 레이 거리를 0.6f로 짧게 제한하나: 길게 쏘면 "아래층 바닥"까지 감지해서 캐릭터가 아래층으로 순간이동해버림.
-    //   그래서 "지금 서 있는 층 바닥만" 감지되게 짧게 제한한 것. (이 버그를 실제로 겪어서 이렇게 만든 것으로 보임)
-    // (3)footOffset: 발바닥 위치 = 중심 - footOffset. 그래서 바닥 Y + footOffset이 캐릭터 중심이 가야 할 좌표.
+    // ==================================================================
+    // [버그수정] 이 꼭대기(laddertop) 트리거가 "지금 타는 사다리와 관련 있는가" 판정.
+    // (1)사다리 타는 중이 아니면 무조건 true (일반 감지)
+    // (2)타는 중이면 ladderCenterX 가 이 꼭대기 트리거의 가로범위 안에 있어야 인정 -> 다른 사다리 꼭대기 오염 차단
+    // (3)Margin(0.1) : 경계에 딱 걸칠때 흔들리지 않게 주는 여유값
+    // ==================================================================
+    bool IsThisLadderTopRelevant(Collider2D topCol)
+    {
+        if (!ladderTrigger) return true;
+        Bounds b = topCol.bounds;
+        return ladderCenterX >= b.min.x - ladderTopMatchMargin && ladderCenterX <= b.max.x + ladderTopMatchMargin;
+    }
+
+    // ==================================================================
+    // 피벗(transform.position) 에서 콜라이더 발바닥까지의 거리
+    // (1)BoxCollider2D : size.y 의 절반 - offset.y  (콜라이더 중심이 offset 만큼 위로 올라가있으면 그만큼 발바닥은 가까워짐)
+    // (2)그외 콜라이더 : bounds.extents.y (중심에서 위/아래 끝까지의 절반높이)
+    // ※ 참고 : `col as BoxCollider2D` -> col 이 BoxCollider2D 면 변환해주고, 아니면 null (예외 안터지는 안전한 형변환)
+    // (3)지금은 ExitLadderToGround 가 bounds 기준으로 바뀌어서 안쓰지만, 피벗->발바닥 거리가 필요할때 재활용 가능
+    // ==================================================================
+    float GetFootOffset()
+    {
+        BoxCollider2D boxCol = col as BoxCollider2D;
+        if (boxCol != null) return boxCol.size.y * 0.5f - boxCol.offset.y;
+        if (col != null) return col.bounds.extents.y;
+        return 0.25f;
+    }
+
+    // ==================================================================
+    // ★ 발 아래 바닥까지의 실제 간격 (없으면 float.MaxValue)
+    // ※ Physics2D.Raycast(시작점, 방향, 거리, 레이어마스크) -> RaycastHit2D 반환
+    // (1)hit.collider == null : 아무것도 못맞춤
+    // (2)hit.distance : 시작점에서 맞은 곳까지 거리 / hit.point : 맞은 지점의 월드좌표
+    // ※ 왜 col.bounds.min.y 를 썼나
+    // (1)피벗(transform.position)은 스프라이트마다 위치가 달라서 발바닥과 어긋날 수 있음
+    // (2)bounds.min.y 는 콜라이더 "실제 바닥면" 이라 피벗/오프셋에 상관없이 정확
+    // ※ lift(0.05) : 바닥면 살짝 "위"에서 쏴야 한다. 바닥면 정확히 그 높이에서 쏘면 이미 바닥 안쪽이라 판정이 불안정
+    //   -> 쏜 거리에서 lift 를 빼서 실제 간격으로 환산
+    // ※ const : 바뀌지 않는 상수 선언 (지역변수에도 사용 가능)
+    // ==================================================================
+    float GetGroundGapBelowFeet()
+    {
+        if (col == null) return float.MaxValue;
+
+        // 콜라이더 실제 바닥(bounds.min.y) 기준으로 측정 (피벗/오프셋 오차 영향 없음)
+        Bounds b = col.bounds;
+        const float lift = 0.05f;
+        Vector2 origin = new Vector2(b.center.x, b.min.y + lift);
+        RaycastHit2D hit = Physics2D.Raycast(origin, Vector2.down, lift + 1.0f, groundLayer);
+        if (hit.collider == null) return float.MaxValue;
+        return Mathf.Max(0f, hit.distance - lift);   // 음수 방지
+    }
+
+    // ==================================================================
+    // ★ 사다리 중 "발이 실제로 바닥에 닿았는가"
+    // (1)ladderExitArmed 가 false 인 동안은 항상 false 반환 (탑승 직후 윗층 바닥 때문에 바로 해제되는 것 방지)
+    // (2)간격이 (contactGap + 0.02) 보다 커지면 armed = true -> 그 뒤부터 간격 <= contactGap 이면 "닿았다"
+    // (3)+0.02 는 armed 되는 기준과 해제 기준 사이에 틈을 둬서 경계에서 깜빡이는 걸 막는 용도 (히스테리시스)
+    // ==================================================================
+    bool IsFeetOnGroundForLadder()
+    {
+        float gap = GetGroundGapBelowFeet();
+
+        // 탑승 직후엔 발이 바닥에서 한 번 떨어진 뒤부터 해제 판정 활성화
+        if (!ladderExitArmed)
+        {
+            if (gap > ladderGroundContactGap + 0.02f) ladderExitArmed = true;
+            else return false;
+        }
+        return gap <= ladderGroundContactGap;
+    }
+
+    // ==================================================================
+    // ★ 사다리에서 내려와 땅 위로 복귀
+    // (1)사다리 상태 플래그 끄고 중력 복구
+    // (2)발 바로 아래(0.1 이내)에 바닥이 있으면 "발바닥이 바닥면에 딱 붙도록" 위치 보정
+    //    -> dy = 바닥면Y - 내 발바닥Y 만큼 이동 (멀면 보정안하고 중력으로 자연스럽게 낙하)
+    // (3)transform.position 과 rb.position 을 둘 다 갱신 (한쪽만 바꾸면 물리엔진이 다음 프레임에 되돌릴 수 있음)
+    // (4)rb.velocity 에 axisH * speed 를 주는 이유 : 사다리에서 옆키 누른채 내렸을때 바로 걸어가게
+    // ==================================================================
     void ExitLadderToGround()
     {
-        ladderTrigger = false;  // 사다리 상태 해제
+        ladderTrigger = false;
+        ladderExitArmed = false;
 
-        // 발 오프셋 계산 (BoxCollider2D면 정확히, 아니면 콜라이더 외형 절반, 기본 0.25)
-        float footOffset = 0.25f;
-        BoxCollider2D boxCol = col as BoxCollider2D;
-        if (boxCol != null)
+        // 아주 가까운 바닥에만 보정 스냅 (멀면 스냅하지 않고 중력으로 자연스럽게 낙하)
+        if (col != null)
         {
-            footOffset = boxCol.size.y * 0.5f - boxCol.offset.y;
-        }
-        else if (col != null)
-        {
-            footOffset = col.bounds.extents.y;  // extents = bounds의 절반 크기
-        }
-
-        // 아래로 짧게(0.6f) 레이를 쏴서 현재 층의 바닥만 정확히 감지
-        RaycastHit2D groundHit = Physics2D.Raycast(transform.position, Vector2.down, 0.6f, groundLayer);
-        if (groundHit.collider != null)
-        {
-            float targetY = groundHit.point.y + footOffset;  // 바닥에 발 붙인 중심 Y
-            Vector2 targetPos = new Vector2(transform.position.x, targetY);
-            transform.position = targetPos;  // 트랜스폼 위치도
-            rb.position = targetPos;         // 리지드바디 위치도 동시에 맞춰줌 (안 그러면 다음 물리틱에 원위치)
+            Bounds b = col.bounds;
+            const float lift = 0.05f;
+            Vector2 origin = new Vector2(b.center.x, b.min.y + lift);
+            RaycastHit2D groundHit = Physics2D.Raycast(origin, Vector2.down, lift + 0.1f, groundLayer);
+            if (groundHit.collider != null)
+            {
+                float dy = groundHit.point.y - b.min.y;
+                Vector2 targetPos = new Vector2(transform.position.x, transform.position.y + dy);
+                transform.position = targetPos;
+                rb.position = targetPos;
+            }
         }
 
-        // 사다리 탈출 직후 걷기 상태로 자연스럽게 이어지게 속도와 중력 복구
         rb.velocity = new Vector2(axisH * speed, 0f);
         rb.gravityScale = fallGravity;
     }
 
-    // PonpokoJumpRoutine() — 점프 전 과정 관리 코루틴 (핵심!)
-    // (1)왜 코루틴으로 구현했나: 점프는 "시작→상승→정점→하강→착지"라는 시간에 따른 흐름이 있는데,
-    //   이걸 Update에서 if문으로 상태 관리하면 변수가 10개는 필요함. 코루틴은 "한 함수 안에 흐름을 쭉 적고
-    //   yield로 프레임 넘기면서" 처리할 수 있어서 훨씬 직관적.
-    // (2)하는 일: ①점프 직후 X방향·Y초기속도 "고정"(원작 아케이드 스타일)
-    //   ②애니메이터를 "프레임 수동 조작 모드"로 전환(anim.speed=0 + Play(정규화시간) + Update(0))
-    //   ③매 FixedUpdate마다 현재 물리 상태(상승률/높이) 보고 점프 애니메이션 프레임을 5→10→15→20→25 키프레임에 정확히 매핑
-    //   ④착지하면 코루틴 종료, 달리기/Idle로 자연스럽게 복귀
-    // (3)★★★ 애니메이션 프레임 수동 제어 기법 (잘 안 쓰는 기법이니 기억해둘 것) ★★★
-    //   - anim.speed = 0f: 애니메이터의 "자동 재생"을 멈춤. 시간이 흘러도 프레임이 안 바뀜.
-    //   - anim.Play(해시, 레이어, normalizedTime): 지정한 "정규화 시간(0~1)" 위치로 강제 이동.
-    //     여기선 5f/30f = "30fps 기준 5프레임 지점". 즉 첫 5프레임(서 있는 Idle 구간)은 건너뛰고 공중 첫 자세부터 시작.
-    //   - anim.Update(0f): 애니메이터를 "0초만큼 진행"시킴. 즉 방금 Play로 지정한 프레임을 "이번 프레임에 즉시 적용"하라는
-    //     강제 갱신 호출. 이걸 안 하면 다음 프레임에나 반영됨.
-    //   - 이 셋트(speed=0 → Play(normalizedTime) → Update(0))를 매 프레임 반복하면 "시간이 아니라 내가 원하는 값으로
-    //     애니메이션 프레임을 움직일" 수 있음. (영상 편집의 "스크럽(scrub)"과 같음. 물리 높이에 따라 프레임 싱크시킬 때 씀)
+    // ==================================================================
+    // ※ 뿅뿅 점프 코루틴 (코루틴 시트 참고)
+    // 1.흐름
+    // (1)점프 시작 처리(속도 부여, 소리) -> (2)공중 체공시간 미리 계산 -> (3)while 루프로 착지할때까지 매 FixedUpdate 마다 속도/애니메이션 갱신
+    // -> (4)착지 후 상태 복구
+    // 2.왜 코루틴인가 : "점프 시작 ~ 착지" 라는 시간에 걸친 일을 변수/플래그 없이 한 메소드에 순서대로 쓸 수 있어서
+    //   (Update 로 하면 상태 변수가 여러개 필요함)
+    // ==================================================================
     IEnumerator PonpokoJumpRoutine()
     {
         isJumping = true;
@@ -516,7 +667,9 @@ public class playerController : MonoBehaviour
         source.Stop();
         source.PlayOneShot(jump);
 
-        // 1. X축 속도 고정 (공중 방향전환 차단)
+        // ---- 1.점프 방향 결정 ----
+        // (1)방향키 누르고 있으면 그 방향 / 안누르면 지금 바라보는 방향으로 점프
+        // ※ Mathf.Sign(값) : 양수면 1, 음수면 -1 (0이면 1 반환 주의)
         float dirX = 0f;
         if (Mathf.Abs(axisH) > 0.1f)
         {
@@ -536,33 +689,46 @@ public class playerController : MonoBehaviour
         {
             if (currentFacing == FacingState.Right) dirX = 1f;
             else if (currentFacing == FacingState.Left) dirX = -1;
-            else dirX = (transform.localScale.x < 0f) ? 1f : -1f;
+            else dirX = (transform.localScale.x < 0f) ? 1f : -1f;   // Front 일땐 localScale 로 판단
         }
 
+        // 점프중엔 이 X속도 고정 (원작처럼 공중에서 방향전환 불가)
         float fixedVelX = dirX * fixedJumpSpeedX;
 
-        // 2. 숏/롱 점프를 Y축 초기 속도로 분단
+        // 방향키 누르고 점프 = 롱점프(Y힘 큼), 제자리 = 숏점프
+        // ※ 삼항연산자 : 조건 ? 참일때값 : 거짓일때값
         float selectedJumpY = (Mathf.Abs(axisH) > 0.1f) ? longJumpPowerY : shortJumpPowerY;
 
+        // ---- 2.점프 애니메이션 상태 이름 찾기 ----
+        // ※ Animator.StringToHash("이름") : 상태이름 문자열을 정수 해시로 변환. anim.Play 에 문자열 대신 해시를 쓰면 빠르다
+        // ※ anim.HasState(레이어, 해시) : 그 레이어에 그 상태가 존재하나 (대소문자 둘다 대응하려고 "jump" 없으면 "Jump" 사용)
         int jumpStateHash = anim.HasState(0, Animator.StringToHash("jump"))
             ? Animator.StringToHash("jump")
             : Animator.StringToHash("Jump");
 
-        // 첫 공중 자세 키프레임(4프레임)에서 시작
+        // ---- 3.애니메이션을 "수동 재생" 모드로 ----
+        // ※ anim.speed = 0f : 애니메이터 자동 재생을 멈춤 (내가 직접 시간을 정해서 재생하려고)
+        // ※ anim.Play(상태해시, 레이어, 정규화시간) : 그 상태의 "정규화시간" 위치로 점프해서 재생
+        //   (정규화시간 : 0 = 처음, 1 = 끝. 4f/30f 는 30프레임짜리 클립의 4번째 프레임 위치)
+        // ※ anim.Update(0f) : 애니메이터를 "지금 즉시" 한번 평가해서 화면에 반영 (안쓰면 다음 프레임에야 바뀜)
+        // 주의 : 애니메이션 클립 길이를 30프레임 기준으로 가정하고 있음. 클립 프레임수가 바뀌면 4f/30f, 30f/30f 도 같이 수정해야함
         anim.speed = 0f;
         anim.Play(jumpStateHash, 0, 4f / 30f);
         anim.Update(0f);
 
         rb.gravityScale = riseGravity;
-        rb.velocity = new Vector2(fixedVelX, selectedJumpY);
+        rb.velocity = new Vector2(fixedVelX, selectedJumpY);   // 이 순간 점프 발사
 
-        // ★ 총 공중 시간을 중력 상수로부터 정확히 역산 (3단계 중력 고려)
-        //   상승1: v0 -> thr 까지 riseGravity / 상승2(체공): thr -> 0 까지 peakHangGravity
-        //   하강1(체공): 0 -> thr 까지 peakHangGravity / 하강2: 나머지 높이를 fallGravity로
-        //   이렇게 구한 totalAirTime 동안 4/30 -> 30/30 을 등속으로 재생하면
-        //   착지 순간 정확히 마지막 프레임(30, 서 있는 자세)에서 끝나 스냅이 없음.
-        float g = Mathf.Abs(Physics2D.gravity.y);
-        float thr = Mathf.Max(0.01f, peakVelocityThreshold);
+        // ---- 4.총 체공시간 계산 (애니메이션을 점프 시간에 딱 맞추려고) ----
+        // ※ 등가속도 운동 공식 (물리) : v = v0 - a*t,  h = (v0^2 - v^2) / (2a),  a = g * gravityScale
+        // (1)상승 구간1 : 처음속도(v0) -> 정점 임계속도(thr) 까지 (riseGravity 로 감속)  => riseT1(시간), riseH1(올라간 높이)
+        // (2)상승 구간2 : thr -> 0 (정점, peakHangGravity)                            => riseT2, riseH2
+        // (3)정점 높이 peakH = riseH1 + riseH2
+        // (4)하강 구간1 : 정점에서 thr 속도까지 (peakHangGravity)                      => fallT1
+        // (5)하강 구간2 : 남은 높이(fallH2)를 fallGravity 로 낙하                       => fallT2 (2차방정식 근의공식으로 시간 구함)
+        // (6)총 체공시간 = 네 구간 합 (최소 0.2초 보장)
+        float g = Mathf.Abs(Physics2D.gravity.y);   // 기본 중력 크기 (Edit > Project Settings > Physics 2D 값, 보통 9.81)
+        float thr = Mathf.Max(0.01f, peakVelocityThreshold);   // 0 으로 나누기 방지용 최소값
         float v0 = Mathf.Max(thr + 0.01f, selectedJumpY);
 
         float riseT1 = (v0 - thr) / (g * riseGravity);
@@ -572,35 +738,38 @@ public class playerController : MonoBehaviour
         float peakH = riseH1 + riseH2;
 
         float fallT1 = thr / (g * peakHangGravity);
-        float fallH2 = peakH - (thr * thr) / (2f * g * peakHangGravity); // 하강2 구간 높이
+        float fallH2 = peakH - (thr * thr) / (2f * g * peakHangGravity);
         float fallT2 = (Mathf.Sqrt(thr * thr + 2f * g * fallGravity * Mathf.Max(0.001f, fallH2)) - thr) / (g * fallGravity);
 
         float totalAirTime = Mathf.Max(0.2f, riseT1 + riseT2 + fallT1 + fallT2);
-        float jumpStartTime = Time.time;
+        float jumpStartTime = Time.time;   // 점프 시작 시각 (Time.time = 게임 시작 후 경과 초)
 
+        // ※ yield return new WaitForFixedUpdate() : 다음 FixedUpdate 까지 대기 (코루틴 시트 4-4, 철자는 WaitForFixedUpdate 가 맞음)
+        // (1)점프 발사 직후 한 물리프레임 기다려서 rb.velocity 가 실제 반영된 상태에서 루프 시작
         yield return new WaitForFixedUpdate();
 
-        bool hasReachedPeak = false;  // 착지 판정용으로만 사용 (애니메이션 매핑에는 쓰지 않음)
+        bool hasReachedPeak = false;   // 정점(Y속도가 0 이하로 꺾임)을 한번 찍었나 -> 점프 직후 바닥에 붙어있는 상태를 착지로 오인하는 것 방지
 
         while (true)
         {
-            if (isDead) yield break;
+            if (isDead) yield break;   // 점프중 죽으면 코루틴 즉시 종료 (코루틴 시트 5번 yield break)
 
-            // 정점 도달은 착지 브레이크 조건에만 씀 (최초 1회만 기록)
             if (!hasReachedPeak && rb.velocity.y <= 0f)
             {
                 hasReachedPeak = true;
             }
 
-            // ★ 단일 등속 매핑: 경과 시간 비율로 4프레임 -> 30프레임을 선형 보간
-            //   구간 전환(상승/하강)이 없어 정점에서 끊김 없고, 추정 오차도 없음.
+            // 경과시간 비율(0~1) -> 애니메이션 정규화시간(4/30 ~ 30/30) 으로 변환
+            // ※ Mathf.Clamp01(값) : 값을 0~1 사이로 잘라냄
+            // ※ Mathf.Lerp(a, b, t) : t(0~1) 비율만큼 a 에서 b 로 보간 (t=0 이면 a, t=1 이면 b)
             float t = Mathf.Clamp01((Time.time - jumpStartTime) / totalAirTime);
             float animNormalizedTime = Mathf.Lerp(4f / 30f, 30f / 30f, t);
 
-            rb.velocity = new Vector2(fixedVelX, rb.velocity.y);
+            rb.velocity = new Vector2(fixedVelX, rb.velocity.y);   // 매 프레임 X속도 고정 유지 (Y는 중력이 계산한 값 그대로)
             anim.Play(jumpStateHash, 0, animNormalizedTime);
             anim.Update(0f);
 
+            // 정점을 찍은 뒤 땅에 닿으면 착지 -> while 탈출
             if (hasReachedPeak && onGround)
             {
                 break;
@@ -609,7 +778,8 @@ public class playerController : MonoBehaviour
             yield return new WaitForFixedUpdate();
         }
 
-        // 사다리 구멍 위 착지 시 점프 시작 높이로 정렬
+        // ---- 5.착지 후 처리 ----
+        // 사다리 구멍(바닥 콜라이더 없는 곳)에 착지했으면 시작 높이로 되돌려서 구멍에 빠지는 것 방지
         bool hitSolidGround = Physics2D.Linecast(transform.position, transform.position - (transform.up * 0.25f), groundLayer);
         if (!hitSolidGround && (isNearLadder || isLadderTop))
         {
@@ -618,8 +788,9 @@ public class playerController : MonoBehaviour
 
         isStunned = false;
         isJumping = false;
-        anim.speed = 1f;
+        anim.speed = 1f;   // 수동재생 끝, 애니메이션 자동 재생 복구
 
+        // 착지했는데 방향키 누르고 있으면 바로 달리기로 이어가고, 아니면 정지 + Idle
         if (Mathf.Abs(axisH) > 0.1f && !ladderTrigger)
         {
             rb.velocity = new Vector2(axisH * speed, 0f);
@@ -629,81 +800,113 @@ public class playerController : MonoBehaviour
         else
         {
             rb.velocity = Vector2.zero;
-            anim.Play("Idle", 0);
+            anim.Play("Idle", 0);   // 문자열로 상태 재생 (해시보다 느리지만 가끔 한번이라 OK)
         }
     }
 
-
-
-    // [위층 트랩 예외 처리] 점프 중 캐릭터의 머리(중심보다 위쪽)가 천장 쪽(jumpStartY + 0.20f 이상) 트랩 밑면에 닿았을 때만 무시
-    // (1)왜 필요하나: 폰포코 맵은 5층 구조라서, 플레이어가 3층에서 점프해 올라가다가 "4층 바닥에 달린 트랩(스파이크)"의
-    //   "밑면"에 머리를 부딪힐 수 있음. 그런데 트랩은 OnTriggerEnter로 "닿으면 죽음" 처리돼 있어서, 머리가 밑면에
-    //   스치기만 해도 죽어버림. 원작은 "트랩은 밟아야(위에서 닿아야) 죽지, 밑에서 머리 부딪힌 건 안 죽는다"는 룰이라서
-    //   "위쪽(머리)에서 닿은 트랩 충돌은 무시"하는 예외 로직이 필요한 것.
-    // (2)판정 방법: ①점프 중이어야 함 ②Physics2D.Distance(col, trapCol): 두 콜라이더 사이의 "가장 가까운 점들(pointA, pointB)"과
-    //   거리를 계산해주는 메소드. ColliderDistance2D 구조체 리턴. ③접촉 지점(contactY)이 "캐릭터 중심보다 위쪽"=머리 부분이고
-    //   ④접촉 지점이 "점프 시작 높이보다 0.2유닛 이상 위"=즉 "위층"에 있는 트랩이다 → 위 두 조건 만족하면 무시(true 리턴).
-    // (3)Physics2D.Distance vs OnCollision: 트리거(Trigger)는 물리 충돌이 아니라 "겹침"이라서 collision.contacts(접촉점 정보)가
-    //   없음. 그래서 두 콜라이더의 가장 가까운 점을 Distance()로 직접 계산해서 접촉 위치를 추정하는 것. (트리거의 한계를 우회하는 기법)
+    // ==================================================================
+    // ※ 점프중 "윗층 함정" 판정 (점프로 윗층 함정에 부딪힌것처럼 오인되는 것 방지)
+    // (1)Physics2D.Distance(콜라이더A, 콜라이더B) : 두 콜라이더 사이 "가장 가까운 두 점" 정보를 돌려줌 (ColliderDistance2D)
+    //    - dist.pointA : A(나) 위의 가장 가까운 점 / dist.pointB : B(함정) 위의 가장 가까운 점 / dist.isValid : 계산 성공 여부
+    // (2)접촉점이 내 몸 중심보다 위쪽 + 점프 시작 높이보다 0.2 이상 위 -> 한층 위의 함정이라 판단하고 무시(true 반환)
+    // (3)점프중이 아니면 항상 false (평소엔 모든 함정에 걸림)
+    // ==================================================================
     bool IsUpperFloorTrap(Collider2D trapCol)
     {
         if (!isJumping || col == null) return false;
 
         ColliderDistance2D dist = Physics2D.Distance(col, trapCol);
-        if (!dist.isValid) return false;  // (1)isValid: 계산이 유효한지. 콜라이더가 비활성이면 false.
+        if (!dist.isValid) return false;
 
-        // 실제 충돌이 일어난 지점의 Y좌표 (두 점 중 더 위에 있는 점이 접촉 지점)
         float contactY = Mathf.Max(dist.pointA.y, dist.pointB.y);
         float playerCenterY = col.bounds.center.y;
 
-        // 1) 충돌 지점이 캐릭터 몸통 중심보다 위쪽(머리)이고
-        // 2) 점프를 시작한 바닥의 캐릭터 Y좌표(jumpStartY)보다 0.20유닛 이상 높은 천장 위치일 때만 위층 트랩으로 판정
         return (contactY > playerCenterY) && (contactY > jumpStartY + 0.20f);
     }
 
-    // OnTriggerEnter2D / OnTriggerStay2D / OnTriggerExit2D — 트리거 콜라이더 겹침 이벤트 콜백 (2D 전용!)
-    // (1)트리거(Trigger)란: 콜라이더의 "Is Trigger" 체크박스 켜면 물리 충돌(밀어내기)이 없어지고 그냥 "겹쳤다"는
-    //   이벤트만 받음. 아이템·사다리·트랩처럼 "닿았음을 감지만" 하면 되는 것들에 씀.
-    // (2)세 콜백 차이: Enter="이번 프레임에 막 겹치기 시작했을 때" 1회 / Stay="겹쳐있는 동안" 매 프레임 / Exit="벗어났을 때" 1회.
-    // (3)왜 monster/trap/fall은 Enter와 Stay 둘 다에 넣었나: Enter는 한 번만 호출되니까, 만약 그 한 프레임에 isDead 가드나
-    //   다른 로직으로 씹히면 죽음 처리 누락됨. Stay에서도 계속 체크해서 "닿아있는 한 확실히 죽게" 만든 것.
-    //   (중복 호출은 Die() 안의 if(isDead) return 가드가 막아줌)
-    // (4)태그 목록 (씬에서 미리 Tags & Layers에 등록해야 함): ladder(사다리 몸통) / laddertop(사다리 꼭대기) /
-    //   monster(몬스터) / trap(트랩/스파이크) / fall(낙사 구멍)
+    // ==================================================================
+    // ※ 트리거 이벤트 3종 (isTrigger 체크된 콜라이더와 겹칠때 자동 호출)
+    // (1)OnTriggerEnter2D : 겹치기 시작한 "그 순간" 한번
+    // (2)OnTriggerStay2D : 겹쳐있는 동안 매 물리프레임 호출
+    // (3)OnTriggerExit2D : 겹침이 끝난 순간 한번
+    // (4)매개변수 collision : 부딪힌 "상대방" 콜라이더 (collision.tag 로 종류 구분)
+    // (5)주의 : 2D 는 반드시 이름 끝에 2D 가 붙은 메소드여야 함 (OnTriggerEnter 는 3D용이라 2D 에선 호출 안됨)
+    // (6)주의 : 둘 중 하나는 Rigidbody2D 가 있어야 이벤트 발생 / 상대가 isTrigger 여야 Trigger 계열, 아니면 OnCollision 계열
+    // ※ collision.tag.Equals("문자열") : 태그 비교 (CompareTag("문자열") 이 더 빠르고 오타시 경고도 떠서 권장되지만 동작은 같음)
+    // ==================================================================
     private void OnTriggerEnter2D(Collider2D collision)
     {
-        if (collision.tag.Equals("ladder"))  // tag.Equals: 문자열 비교. tag는 string이라 ==으로도 되지만 여기선 Equals 사용.
+        if (collision.tag.Equals("ladder"))
         {
-            isNearLadder = true;
-            ladderCenterX = GetLadderCenterX(collision);  // 사다리 정중앙 계산해 저장
+            // ★ [버그수정 핵심] 사다리 타는 중엔 다른 사다리 트리거에 들어가도 완전 무시.
+            if (ladderTrigger) return;
+
+            // [버그수정] 더 가까운 사다리만 current로 등록 (flip-flop 방지, -0.05f 히스테리시스)
+            // ※ 히스테리시스 : 후보가 "충분히 더(0.05) 가까울때만" 교체해서 두 사다리 사이에서 번갈아 바뀌는 깜빡임을 막는 기법
+            float centerX = GetLadderCenterX(collision);
+            float dist = Mathf.Abs(centerX - transform.position.x);
+            float currentDist = (currentLadderCollider != null)
+                ? Mathf.Abs(ladderCenterX - transform.position.x)
+                : float.MaxValue;
+            if (currentLadderCollider == null || collision == currentLadderCollider || dist < currentDist - 0.05f)
+            {
+                currentLadderCollider = collision;
+                isNearLadder = true;
+                ladderCenterX = centerX;
+            }
         }
         else if (collision.tag.Equals("laddertop"))
         {
+            // [버그수정] 지금 타는 사다리 꼭대기만 인정. 카운터로 중첩 관리.
+            // ※ 카운터 방식 : 트리거가 여러개 겹칠때 bool 하나로 하면 하나만 나가도 false 가 되어버림
+            //   -> Enter 때 ++, Exit 때 -- 해서 0 이 되면 진짜로 다 나간 것으로 판단
+            if (!IsThisLadderTopRelevant(collision)) return;
+            ladderTopOverlapCount++;
             isLadderTop = true;
         }
         else if (collision.tag.Equals("monster"))
         {
-            Die(DeathType.OnFloor);  // 몬스터 닿음 = 제자리 사망(OnFloor)
+            Die(DeathType.OnFloor);
         }
         else if (collision.tag.Equals("trap"))
         {
-            if (IsUpperFloorTrap(collision)) return;  // 위층 트랩 밑면에 머리 부딪힌 거면 무시
+            if (IsUpperFloorTrap(collision)) return;
             Die(DeathType.OnFloor);
         }
         else if (collision.tag.Equals("fall"))
         {
             if (IsUpperFloorTrap(collision)) return;
-            Die(DeathType.FallDown);  // 낙사 구멍에 빠짐 = 추락사(FallDown)
+            Die(DeathType.FallDown);
         }
     }
 
+    // Stay : Enter 를 놓쳤을때(예: 사다리 타다 내린 직후 다시 범위 안) 상태를 보정하는 역할도 함
     private void OnTriggerStay2D(Collider2D collision)
     {
-        // Enter와 로직 동일. "계속 닿아있는 동안" 확실히 처리하기 위해 중복 구현.
         if (collision.tag.Equals("ladder") && !ladderTrigger)
         {
-            isNearLadder = true;
-            ladderCenterX = GetLadderCenterX(collision);
+            // [버그수정] 가장 가까운 사다리만 갱신 (Enter와 동일 로직)
+            float centerX = GetLadderCenterX(collision);
+            float dist = Mathf.Abs(centerX - transform.position.x);
+            float currentDist = (currentLadderCollider != null)
+                ? Mathf.Abs(ladderCenterX - transform.position.x)
+                : float.MaxValue;
+            if (currentLadderCollider == null || collision == currentLadderCollider || dist < currentDist - 0.05f)
+            {
+                currentLadderCollider = collision;
+                isNearLadder = true;
+                ladderCenterX = centerX;
+            }
+        }
+        else if (collision.tag.Equals("laddertop"))
+        {
+            // [버그수정] 관련 없는 꼭대기 트리거는 무시. Enter 누락 대비 카운터 보정.
+            if (!IsThisLadderTopRelevant(collision)) return;
+            if (!isLadderTop)
+            {
+                ladderTopOverlapCount++;
+                isLadderTop = true;
+            }
         }
         else if (collision.tag.Equals("monster"))
         {
@@ -725,26 +928,37 @@ public class playerController : MonoBehaviour
     {
         if (collision.tag.Equals("ladder"))
         {
-            isNearLadder = false;
-            if (ladderTrigger)
+            // [버그수정] "지금 감지 중인 사다리"에서 빠져나왔을 때만 탈출 처리.
+            if (collision == currentLadderCollider)
             {
-                ExitLadderToGround();  // 사다리 범위 벗어났는데 아직 타는 중이면 강제 탈출
+                currentLadderCollider = null;
+                isNearLadder = false;
+                if (ladderTrigger)
+                {
+                    ExitLadderToGround();
+                }
+                ladderTrigger = false;
+                currentFacing = FacingState.Front;
             }
-            ladderTrigger = false;
-            currentFacing = FacingState.Front;  // 사다리 벗어나면 일단 정면 상태로 (이후 이동 시 다시 전환)
+            // 다른 사다리 트리거에서 빠져나온 경우: 아무것도 안 함.
         }
         else if (collision.tag.Equals("laddertop"))
         {
-            isLadderTop = false;
+            // [버그수정] 카운터 방식. 꼭대기 여러 개 겹쳐 있을 때 하나만 빠져나와도 isLadderTop 유지.
+            if (!IsThisLadderTopRelevant(collision)) return;
+            ladderTopOverlapCount--;
+            if (ladderTopOverlapCount <= 0)
+            {
+                ladderTopOverlapCount = 0;   // 혹시 음수로 내려가는 것 방지
+                isLadderTop = false;
+            }
         }
     }
 
-    // GetCurrentFloorByY() — Y좌표로 "지금 몇 층인지" 판정
-    // (1)판정 로직: 위에서부터(5층→1층) 차례로 비교. y >= floor5MinY면 5층, 아니면 y >= floor4MinY면 4층...
-    //   어디에도 안 걸리면 1층. (if-else if 체인)
-    // (2)왜 위에서부터 비교하나: floor5MinY가 가장 크고 floor2MinY가 가장 작음. 만약 아래(1층)부터 비교하면
-    //   "y >= -2.12" 같은 낮은 기준에 전부 걸려서 5층에 있어도 1층으로 판정됨. 그래서 "가장 높은 기준"부터 비교해야 함.
-    // (3)이 값은 사망 음원 고를 때만 씀. (floor1~5Clip 선택)
+    // ==================================================================
+    // Y좌표로 층 판정 : 위층부터 차례로 검사해서 처음 만족하는 층 반환
+    // (1)else if 체인 : 위에서부터 y >= 기준값 인지 보고, 안되면 다음 층 기준으로 내려감
+    // ==================================================================
     int GetCurrentFloorByY(float y)
     {
         if (y >= floor5MinY) return 5;
@@ -754,77 +968,56 @@ public class playerController : MonoBehaviour
         else return 1;
     }
 
-    // 사망 유형 열거형: OnFloor(제자리/트랩/몬스터 사망) / FallDown(추락사)
-    // (1)왜 enum으로 나누나: 사망 연출이 완전히 다름. OnFloor는 그 자리에서 죽는 척(애니메이션 0프레임에 고정)이고,
-    //   FallDown은 맨 아래까지 회전하며 떨어지는 연출. 그래서 유형을 나눠 Die() 안에서 분기 처리.
+    // 사망 종류 : OnFloor(그자리에서 쓰러짐 - 몬스터/함정) / FallDown(추락 - 낭떠러지)
+    // ※ public enum : 다른 스크립트에서 playerController.DeathType.FallDown 으로 접근 가능
     public enum DeathType { OnFloor, FallDown }
 
-    // Die() — 사망 처리 (가장 복잡한 메소드)
-    // (1)처리 순서: ①중복 사망 방지 가드 ②사망 상태 세팅 + 모든 코루틴 중지 + 목숨 차감 + 애니메이터/오디오 정지
-    //   ③사망한 층 판정 → 층별 사망 음원 선택 ④사망 유형별 연출 분기
-    //     - OnFloor 또는 1층: 그 자리에서 중력 0, death 애니메이션 0프레임에 고정
-    //     - FallDown(2층 이상): "음원 길이에 맞춘 낙하 시간" 계산 → 그 시간 안에 firstFloorY(맨 아래)까지 도달하도록
-    //       중력을 "역산"해서 설정 → 회전 낙하 코루틴 시작
-    //   ⑤목숨 0이면 게임오버(데이터 리셋 + basic 씬), 아니면 점수 롤백 + 현재 씬 리로드
-    // (2)★★★ 중력 역산 공식 (물리 유도 — 나중에 비슷한 거 만들 때 써먹을 것) ★★★
-    //   등가속도 운동 공식: s = v₀·t + ½·a·t²
-    //   낙하는 초기속도 v₀ = 0 이므로 → s = ½·a·t² → a = 2s / t²
-    //   - s = 낙하 거리 = startY - firstFloorY
-    //   - t = 낙하 시간 = 음원길이 - crashSoundDuration (충돌음 직전까지 도달해야 하니까)
-    //   - a = 필요한 중력가속도
-    //   유니티의 실제 중력가속도 = Physics2D.gravity.y × gravityScale  (Physics2D.gravity.y는 기본 -9.81. 음수라 크기만 쓸 거니 Abs)
-    //   따라서 gravityScale = a / |Physics2D.gravity.y|
-    //   → 이렇게 하면 "음원의 비명이 끝나는 타이밍 = 바닥에 도착하는 타이밍"이 정확히 일치한다.
-    // (3)gameManager 참조 방식이 혼합되어 있음 (주의):
-    //   - gameManager.currentLives: "정적(static) 필드"로 직접 접근 (인스턴스 안 통함)
-    //   - gameManager.Instance.ResetAllData() / RollbackScore(): "싱글톤 인스턴스"로 접근
-    //   둘 다 같은 클래스인데 접근 방식이 다름. gameManager 쪽에서 currentLives만 static으로 선언한 듯.
-    //   일관성은 없지만 작동은 함.
+    // ==================================================================
+    // ※ 사망 처리
+    // (1)매개변수 기본값 : deathType = DeathType.OnFloor -> Die() 처럼 인자 없이 호출하면 OnFloor 로 처리
+    // (2)public 이라서 다른 스크립트(몬스터 등)에서 player.Die() 로 호출 가능
+    // (3)isDead 가드 : 두번 죽는 것(트리거 Stay 로 매 프레임 호출) 방지
+    // (4)StopAllCoroutines() : 이 스크립트에서 돌고있는 모든 코루틴 중단 (점프 코루틴 등). 아래에서 새 코루틴을 시작하므로 순서 중요
+    // ==================================================================
     public void Die(DeathType deathType = DeathType.OnFloor)
     {
-        if (isDead) return;  // 중복 사망 방지 (OnTriggerStay에서 계속 불리니까 필수)
+        if (isDead) return;
 
         isDead = true;
-        StopAllCoroutines();  // (1)의미: 이 MonoBehaviour에서 돌아가는 "모든 코루틴"을 즉시 중단.
-                              //   점프 코루틴이 돌아가는 중에 죽으면 그것도 강제 종료시켜야 하니까.
-                              // (2)주의: "이 스크립트의" 코루틴만 멈춤. 다른 오브젝트의 코루틴은 안 멈춤.
+        StopAllCoroutines();
 
-        if (life != null) life.LoseLife();  // 목숨 UI에서 목숨 하나 차감 (null 체크는 Find 실패 대비)
+        if (life != null) life.LoseLife();   // null 체크 : UI 스크립트가 없어도 에러 안나게
 
-        // 애니메이터 파라미터 전부 초기화 (사망 애니메이션으로 깔끔하게 전환되게)
         anim.SetBool("IsRunning", false);
         anim.SetBool("IsClimbing", false);
         anim.SetBool("IsGrounded", false);
-        source.Stop();  // 걷기/점프 소리 끄기
+        source.Stop();
 
-        // 사망한 층 판정 (사망 음원 선택용)
         int currentFloor = GetCurrentFloorByY(transform.position.y);
+        // ※ $"문자열 {변수:F2}" : 문자열 보간. {변수} 자리에 값이 들어가고, :F2 는 소수점 2자리까지 표시
         Debug.Log($"사망 Y좌표: {transform.position.y:F2} -> {currentFloor}층 판정 (유형: {deathType})");
-        // (1)보간 문자열 $"": C# 6.0부터 지원. 변수를 { } 안에 넣으면 문자열에 박아줌. :F2는 소수점 둘째자리까지 = ToString("F2").
 
-        AudioClip selectedClip = over;  // 기본값 = over (폴백)
+        AudioClip selectedClip = over;
 
-        /* ---------- 사망 유형 분기 ---------- */
+        // ---- 그자리 사망 (1층에서의 추락도 같이 처리) ----
         if (deathType == DeathType.OnFloor || currentFloor == 1)
         {
-            // 제자리 사망 또는 1층 사망: 그 자리에서 움직임 완전히 멈추고 사망 자세로 고정
             rb.velocity = Vector2.zero;
-            rb.gravityScale = 0f;  // 중력 끄기 (떨어지지 않게)
+            rb.gravityScale = 0f;   // 그 자리에 고정
 
-            // death 애니메이션의 "0프레임(첫 자세)"에 고정. speed=0으로 자동재생 멈춤.
-            anim.Play("death", 0, 0f);
+            anim.Play("death", 0, 0f);   // death 애니메이션 첫 프레임에서
             anim.Update(0f);
-            anim.speed = 0f;
+            anim.speed = 0f;             // 정지 (쓰러진 모습 고정)
 
-            selectedClip = (floor1Clip != null) ? floor1Clip : over;  // 1층 음원, 없으면 over
+            selectedClip = (floor1Clip != null) ? floor1Clip : over;
             if (selectedClip != null) source.PlayOneShot(selectedClip);
         }
+        // ---- 추락 사망 ----
         else if (deathType == DeathType.FallDown)
         {
-            // 추락사 (2층~5층): 회전하며 맨 아래까지 떨어지는 연출
-            rb.velocity = Vector2.zero;  // 일단 가속도 0에서 시작 (중력으로만 떨어지게)
+            rb.velocity = Vector2.zero;
 
-            // 층별 음원 선택 (없으면 over로 폴백)
+            // 층별 사망 사운드 선택 (비어있으면 기본 over)
             switch (currentFloor)
             {
                 case 2: selectedClip = (floor2Clip != null) ? floor2Clip : over; break;
@@ -835,115 +1028,103 @@ public class playerController : MonoBehaviour
 
             if (selectedClip != null) source.PlayOneShot(selectedClip);
 
-            // 낙하 시간 = 음원 전체 길이 - 마지막 충돌음 길이
-            // (1)왜 충돌음을 빼나: MP3 끝부분의 "콰직!"은 바닥에 부딪히는 순간에 나야 하니까, 그 직전까지가 "낙하 구간".
-            //   충돌음 길이만큼을 미리 빼줘야 싱크가 맞음.
-            // (2)Mathf.Max(0.25f, ...): 음원이 너무 짧아도 최소 0.25초는 확보 (0초 낙하 방지)
+            // 낙하시간 = 사운드 길이 - 마지막 "쿵" 소리 길이 (사운드 끝에 맞춰 착지하도록)
             float fallDuration = 0.5f;
             if (selectedClip != null)
             {
                 fallDuration = Mathf.Max(0.25f, selectedClip.length - crashSoundDuration);
             }
 
-            // 낙하 거리 = 시작 Y - 맨 아래 바닥 Y
+            // ※ 중력 역산 : 원하는 낙하시간(fallDuration) 안에 낙하거리(fallDistance)를 떨어지게 하는 중력 배율 구하기
+            //   자유낙하 공식 : 거리 = 1/2 * a * t^2  ->  a = 2 * 거리 / t^2
+            //   gravityScale = a / 기본중력(9.81)
+            // (1)높은 층일수록 멀리 떨어지니 자동으로 더 센 중력이 적용돼서 항상 사운드 길이에 맞춰 떨어진다
             float startY = transform.position.y;
             float targetY = firstFloorY;
-            float fallDistance = Mathf.Max(0.2f, startY - targetY);  // 최소 거리 확보 (0 나누기 방지)
+            float fallDistance = Mathf.Max(0.2f, startY - targetY);
 
-            // ★ 중력 역산: a = 2s / t²  (위에서 유도한 공식)
             float requiredGravity = (2f * fallDistance) / (fallDuration * fallDuration);
-            // 유니티 중력 = Physics2D.gravity.y × gravityScale 이므로, 필요한 배율 = a / |g|
             rb.gravityScale = requiredGravity / Mathf.Abs(Physics2D.gravity.y);
 
-            // 회전 횟수: 층이 높을수록 많이 회전. (currentFloor - 1)번, 최소 1번.
+            // 층이 높을수록 많이 회전 (최소 1바퀴)
             int rotations = Mathf.Max(1, currentFloor - 1);
             StartCoroutine(FallDeathLandingRoutine(fallDuration, rotations));
         }
 
-        /* ---------- 씬 전환 대기 시간 = 사망 음원 길이 ----------
-         * (1)왜 음원 길이만큼 기다리나: 사망음이 다 끝나기 전에 씬이 바뀌면 소리가 "뚝" 끊김.
-         *   음원이 끝날 때까지 기다렸다가 씬을 전환해야 자연스러움.
-         */
+        // ---- 사운드가 끝난 뒤 씬 재시작/게임오버 ----
         float waitTime = 2.0f;
         if (selectedClip != null)
         {
             waitTime = selectedClip.length;
         }
 
-        // 목숨이 0 이하면 게임오버 처리: 전체 데이터 리셋 + basic(게임오버/타이틀) 씬으로
+        // gameManager.currentLives : static 변수(어디서나 접근 가능) / gameManager.Instance : 싱글톤(씬에 하나뿐인 매니저)
         if (gameManager.currentLives <= 0)
         {
-            gameManager.Instance.ResetAllData();
+            gameManager.Instance.ResetAllData();                    // 게임오버 : 데이터 초기화 후 시작씬("basic")으로
             StartCoroutine(LoadSceneRoutine("basic", waitTime));
         }
         else
         {
-            // 목숨이 남았으면: 점수를 사망 직전으로 롤백 + 현재 씬 리로드(부활)
-            gameManager.Instance.RollbackScore();
-            string activeSceneName = SceneManager.GetActiveScene().name;  // 현재 씬 이름 가져오기
+            gameManager.Instance.RollbackScore();                   // 목숨 남음 : 점수 되돌리고 현재 씬 재시작
+            // ※ SceneManager.GetActiveScene().name : 지금 열려있는 씬의 이름 (같은 씬을 다시 로드해서 재시작)
+            string activeSceneName = SceneManager.GetActiveScene().name;
             StartCoroutine(LoadSceneRoutine(activeSceneName, waitTime));
         }
     }
 
-    // FallDeathLandingRoutine() — 추락사 시 "회전하며 떨어지는" 연출 코루틴
-    // (1)하는 일: ①애니메이터 자동재생 정지(speed=0) → death 애니메이션 프레임을 수동으로 돌림
-    //   ②콜라이더 비활성화 → 떨어지는 동안 바닥/벽에 안 걸리고 맨 아래까지 통과
-    //   ③매 프레임 progress(낙하 진행률) 계산해서, 그에 비례하게 death 애니메이션 프레임을 0~0.98까지 회전시킴.
-    //     deathSpinMultiplier로 회전 속도 배율.
-    //   ④바닥(firstFloorY)에 도달하거나 시간 초과하면 루프 종료 → 콜라이더 복구, 사망 자세(0프레임)로 고정.
-    // (2)회전 연출 원리: death 애니메이션 클립 자체가 "빙글 도는" 프레임으로 구성돼 있고, 그걸 0~1 사이를
-    //   "여러 번" 반복하게 만드는 것. cycle = (progress × 회전수 × 배율) % 1 → % 1(나머지 연산)으로 0~1을 계속 반복.
-    //   (1)예: progress=0.5, rotations=2, multiplier=2 → 0.5×2×2=2 → 2%1=0 → 프레임 0. 즉 두 바퀴 돌고 다시 첫 자세로.
-    // (3)왜 콜라이더를 끄나: 추락 중에 중간 층 바닥에 부딪히면 거기서 멈춰버림. 원작은 "뚫고" 맨 아래까지 떨어져야 하니까
-    //   콜라이더를 잠시 끄는 것. (대신 while 조건으로 y > firstFloorY일 때만 돌고 도달하면 멈춤)
+    // ==================================================================
+    // 추락 사망 연출 코루틴
+    // (1)콜라이더를 꺼서(col.enabled = false) 추락하는 동안 바닥/함정에 안걸리고 1층까지 떨어지게 함
+    // (2)death 애니메이션을 진행도(progress)에 맞춰 여러 바퀴 돌려서 "빙글빙글 추락" 연출
+    //    cycle = (progress * 회전수 * 배율) % 1.0  -> % 1.0 으로 0~1 을 반복해서 애니메이션이 여러번 재생되는 효과
+    // (3)1층 Y(firstFloorY) 아래로 내려가거나, 제한시간(fallDuration + 0.5초) 지나면 루프 탈출 (무한루프 방지)
+    // (4)끝나면 콜라이더 복구, 정지, death 첫 프레임에 고정
+    // ※ yield return null : 다음 프레임까지 대기 (매 프레임 갱신할때 사용 - 코루틴 시트 4-1)
+    // ※ % (나머지 연산자) : float 에도 사용 가능 (예: 2.7f % 1.0f = 0.7)
+    // ==================================================================
     IEnumerator FallDeathLandingRoutine(float fallDuration, int rotations)
     {
-        anim.speed = 0f;  // 자동 재생 정지 → 프레임 수동 조작 모드
+        anim.speed = 0f;
 
         if (col != null)
         {
-            col.enabled = false;  // 콜라이더 비활성화 (중간 층 뚫고 내려가게)
-            // (1)enabled: Component 클래스의 프로퍼티. 컴포넌트를 "임시로 끔".
-            //   SetActive는 오브젝트 자체를 끄는 거고 enabled는 컴포넌트 하나만 끔. 차이 알아둘 것.
+            col.enabled = false;
         }
 
-        float elapsed = 0f;  // 경과 시간 누적용
+        float elapsed = 0f;
 
-        // 바닥에 도달할 때까지 매 프레임 회전 프레임 갱신
         while (transform.position.y > firstFloorY)
         {
-            elapsed += Time.deltaTime;  // (1)Time.deltaTime: 지난 프레임과의 시간 간격(초). 누적하면 경과 시간이 됨.
+            elapsed += Time.deltaTime;   // Time.deltaTime : 이전 프레임 이후 지난 시간(초). 이걸 누적하면 경과시간
 
-            float progress = Mathf.Clamp01(elapsed / fallDuration);  // 낙하 진행률 0~1 (Clamp01로 0~1 제한)
-            // 회전 속도 및 횟수를 deathSpinMultiplier 배율만큼 빠르게 회전하도록 수정
-            float cycle = (progress * rotations * deathSpinMultiplier) % 1.0f;  // 0~1 반복 = 회전
+            float progress = Mathf.Clamp01(elapsed / fallDuration);
+            float cycle = (progress * rotations * deathSpinMultiplier) % 1.0f;
 
-            anim.Play("death", 0, cycle * 0.98f);  // 0.98 곱하는 이유: 클립 마지막 프레임(1.0)은 루프 끊김 현상 있을 수 있어서 직전에서 멈춤
+            anim.Play("death", 0, cycle * 0.98f);   // 0.98 : 1.0 이 되면 다음 반복으로 넘어가 깜빡이는 것 방지
             anim.Update(0f);
 
-            if (elapsed >= fallDuration + 0.5f) break;  // 안전장치: 시간 초과하면 강제 종료 (무한루프 방지)
+            if (elapsed >= fallDuration + 0.5f) break;
 
-            yield return null;  // 다음 프레임까지 대기 (Update 주기로 돌림)
+            yield return null;
         }
 
-        // 바닥 도달 후 정리
-        if (col != null) col.enabled = true;  // 콜라이더 복구 (씬 리로드 직전이지만 혹시 모르니)
+        if (col != null) col.enabled = true;
 
         rb.velocity = Vector2.zero;
         rb.gravityScale = 0f;
 
-        // 사망 자세(0프레임)에 고정
         anim.Play("death", 0, 0f);
         anim.Update(0f);
         anim.speed = 0f;
     }
 
-    // LoadSceneRoutine() — 딜레이 후 씬 전환하는 간단 코루틴
-    // (1)하는 일: WaitForSeconds(초)만큼 기다렸다가 SceneManager.LoadScene(씬이름) 호출.
-    // (2)왜 코루틴으로 하나: "기다렸다가 씬 전환"은 비동기 처리라서 코루틴이 가장 간단.
-    //   Invoke("메소드명", 초)로도 가능하지만 문자열로 메소드명을 넘겨야 해서 불안정.
-    // (3)SceneManager.LoadScene(): 이름으로 씬 로드. Build Settings에 등록된 씬만 로드 가능.
-    //   등록 안 된 씬 이름 넣으면 에러. (basic 씬과 현재 씬이 Build Settings에 있어야 함)
+    // ==================================================================
+    // 딜레이 후 씬 로드 코루틴 (코루틴 시트 1번 "딜레이 주는 방식" 과 같은 패턴)
+    // (1)WaitForSeconds(초) : 그 시간동안 대기 -> 사망 사운드가 끝날때까지 기다렸다가 씬 전환
+    // (2)다른 방식 : Invoke("메소드이름", 초) 도 가능하지만 매개변수를 못넘기고 문자열 이름이라 오타 위험 -> 매개변수가 필요하면 코루틴 사용
+    // ※ SceneManager.LoadScene("씬이름") : 씬 전환. 주의 : File > Build Settings 의 Scenes In Build 목록에 씬이 등록돼있어야 함
+    // ==================================================================
     IEnumerator LoadSceneRoutine(string sceneName, float delay)
     {
         yield return new WaitForSeconds(delay);

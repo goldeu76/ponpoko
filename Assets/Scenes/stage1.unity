@@ -5688,6 +5688,8 @@ MonoBehaviour:
   crashSoundDuration: 0.45
   deathSpinMultiplier: 2
   fallToFirstFloor: 1
+  ladderTopMatchMargin: 0.1
+  ladderGroundContactGap: 0.03
   walk: {fileID: 8300000, guid: 3a1d1560adae48a4a93c9eff60f2225e, type: 3}
   jump: {fileID: 8300000, guid: d13a2139456520142beaac5a799601d4, type: 3}
   over: {fileID: 8300000, guid: 8979a050ed04e7a4cac30ce77a1a5716, type: 3}
