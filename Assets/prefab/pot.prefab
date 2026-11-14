@@ -103,7 +103,7 @@ MonoBehaviour:
   monsterChance: 50
   monsterPrefab: {fileID: 6744715326598250552, guid: 4de0330ccef70be42a81eff21ea94aab, type: 3}
   Trapaudioclip: {fileID: 8300000, guid: 04b0f4eedd443894584c52706573a424, type: 3}
-  Itemaudioclip: {fileID: 8300000, guid: e515e2290b219dd42ad09ab8e5db1684, type: 3}
+  Itemaudioclip: {fileID: 8300000, guid: 14e98da0ef3f954439daf49ca17f2cbd, type: 3}
 --- !u!82 &4822698110587537450
 AudioSource:
   m_ObjectHideFlags: 0

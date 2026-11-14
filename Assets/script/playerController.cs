@@ -765,7 +765,30 @@ public class playerController : MonoBehaviour
             float t = Mathf.Clamp01((Time.time - jumpStartTime) / totalAirTime);
             float animNormalizedTime = Mathf.Lerp(4f / 30f, 30f / 30f, t);
 
-            rb.velocity = new Vector2(fixedVelX, rb.velocity.y);   // 매 프레임 X속도 고정 유지 (Y는 중력이 계산한 값 그대로)
+            // 점프 진행 방향에 벽이 있는지 검사
+            float jumpVelX = fixedVelX;
+
+            if (Mathf.Abs(jumpVelX) > 0.01f && col != null)
+            {
+                Bounds b = col.bounds;
+
+                RaycastHit2D wallHit = Physics2D.BoxCast(
+                    b.center,
+                    b.size * 0.95f,
+                    0f,
+                    Vector2.right * Mathf.Sign(jumpVelX),
+                    0.05f,
+                    groundLayer
+                );
+
+                // 벽이 감지되면 수평 이동만 차단
+                if (wallHit.collider != null)
+                {
+                    jumpVelX = 0f;
+                }
+            }
+
+            rb.velocity = new Vector2(jumpVelX, rb.velocity.y);
             anim.Play(jumpStateHash, 0, animNormalizedTime);
             anim.Update(0f);
 
