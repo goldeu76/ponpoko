@@ -510,20 +510,17 @@ public class playerController : MonoBehaviour
     //     애니메이션 프레임을 움직일" 수 있음. (영상 편집의 "스크럽(scrub)"과 같음. 물리 높이에 따라 프레임 싱크시킬 때 씀)
     IEnumerator PonpokoJumpRoutine()
     {
-        isJumping = true;               // 점프 상태 플래그 ON (Update/FixedUpdate가 이걸 보고 분기)
-        jumpStartY = transform.position.y;  // 점프 시작 높이 저장 (착지 판정·위층 트랩 예외에 씀)
+        isJumping = true;
+        jumpStartY = transform.position.y;
 
-        source.Stop();              // 걷는 소리 겹치지 않게 먼저 Stop
-        source.PlayOneShot(jump);   // 점프 소리 재생
+        source.Stop();
+        source.PlayOneShot(jump);
 
-        // 1. X축 속도는 걷기 속도와 맞춰 일정하게 고정
-        // (1)방향키 누르고 있었으면 그 방향으로, 안 누르고 있었으면 "지금 보고 있는 방향"으로.
-        //   (제자리 점프도 원작은 살짝 앞으로 날아가니 보고 있는 방향으로 dirX 정함)
-        // (2)dirX 정해지면 그 뒤로는 입력 안 받고 fixedVelX 계속 씀 (공중 방향전환 불가).
+        // 1. X축 속도 고정 (공중 방향전환 차단)
         float dirX = 0f;
         if (Mathf.Abs(axisH) > 0.1f)
         {
-            dirX = Mathf.Sign(axisH);  // Sign: 양수면 1, 음수면 -1 리턴 (부호만 추출)
+            dirX = Mathf.Sign(axisH);
             if (dirX > 0f)
             {
                 transform.localScale = new Vector2(-1, 1);
@@ -537,103 +534,82 @@ public class playerController : MonoBehaviour
         }
         else
         {
-            // 제자리 점프: 현재 보고 있는 방향으로 살짝 날아감
             if (currentFacing == FacingState.Right) dirX = 1f;
-            else if (currentFacing == FacingState.Left) dirX = -1f;
-            else dirX = (transform.localScale.x < 0f) ? 1f : -1f;  // Front 상태면 scale로 방향 추정
+            else if (currentFacing == FacingState.Left) dirX = -1;
+            else dirX = (transform.localScale.x < 0f) ? 1f : -1f;
         }
 
-        float fixedVelX = dirX * fixedJumpSpeedX;  // 점프 중 고정 X속도
+        float fixedVelX = dirX * fixedJumpSpeedX;
 
-        // 2. 숏점프와 롱점프를 Y축 초기 속도 차이로 분단
-        // 방향키 누른 채 점프 → longJumpPowerY(높이 큼), 제자리 → shortJumpPowerY(낮음)
+        // 2. 숏/롱 점프를 Y축 초기 속도로 분단
         float selectedJumpY = (Mathf.Abs(axisH) > 0.1f) ? longJumpPowerY : shortJumpPowerY;
 
-        // 점프 애니메이션 상태 해시 구하기.
-        // Animator.StringToHash("문자열"): 애니메이터 상태/파라미터 이름을 "정수 해시값"으로 바꿔줌.
-        //   매번 문자열로 비교하는 것보다 해시(int)로 비교하는 게 빠름.
-        // anim.HasState(레이어, 해시): 그 해시에 해당하는 상태가 애니메이터에 실제로 있는지 확인.
-        //   (1)왜 HasState로 확인하나: 애니메이터 클립 이름이 "jump"인지 "Jump"인지 대소문자가 다를 수 있어서,
-        //     둘 다 시도해보고 있는 쪽을 쓰는 방어 코드.
         int jumpStateHash = anim.HasState(0, Animator.StringToHash("jump"))
             ? Animator.StringToHash("jump")
             : Animator.StringToHash("Jump");
 
-        // 0~5프레임(서 있는 Idle)을 건너뛰고 공중 첫 키프레임인 5프레임(5/30)부터 즉시 시작
-        anim.speed = 0f;                              // 자동 재생 정지 → 프레임 수동 조작 모드
-        anim.Play(jumpStateHash, 0, 5f / 30f);        // 5프레임 위치로 강제 이동
-        anim.Update(0f);                              // 즉시 적용 (갱신 강제)
+        // 첫 공중 자세 키프레임(4프레임)에서 시작
+        anim.speed = 0f;
+        anim.Play(jumpStateHash, 0, 4f / 30f);
+        anim.Update(0f);
 
-        // 물리 초기 세팅: 상승 중력 + (고정 X속도, Y초기속도)
         rb.gravityScale = riseGravity;
         rb.velocity = new Vector2(fixedVelX, selectedJumpY);
 
-        yield return new WaitForFixedUpdate();  // (1)의미: 다음 FixedUpdate(물리틱)까지 대기. 코루틴을 물리 틱에 맞춰 돌리기 위함.
+        // ★ 총 공중 시간을 중력 상수로부터 정확히 역산 (3단계 중력 고려)
+        //   상승1: v0 -> thr 까지 riseGravity / 상승2(체공): thr -> 0 까지 peakHangGravity
+        //   하강1(체공): 0 -> thr 까지 peakHangGravity / 하강2: 나머지 높이를 fallGravity로
+        //   이렇게 구한 totalAirTime 동안 4/30 -> 30/30 을 등속으로 재생하면
+        //   착지 순간 정확히 마지막 프레임(30, 서 있는 자세)에서 끝나 스냅이 없음.
+        float g = Mathf.Abs(Physics2D.gravity.y);
+        float thr = Mathf.Max(0.01f, peakVelocityThreshold);
+        float v0 = Mathf.Max(thr + 0.01f, selectedJumpY);
 
-        bool hasReachedPeak = false;   // 정점(최고점)을 지났는가 (상승→하강 전환 플래그)
-        float actualPeakHeight = 0.05f; // 실제 도달한 최고 높이 (하강 시 프레임 매핑 기준)
+        float riseT1 = (v0 - thr) / (g * riseGravity);
+        float riseH1 = (v0 * v0 - thr * thr) / (2f * g * riseGravity);
+        float riseT2 = thr / (g * peakHangGravity);
+        float riseH2 = (thr * thr) / (2f * g * peakHangGravity);
+        float peakH = riseH1 + riseH2;
+
+        float fallT1 = thr / (g * peakHangGravity);
+        float fallH2 = peakH - (thr * thr) / (2f * g * peakHangGravity); // 하강2 구간 높이
+        float fallT2 = (Mathf.Sqrt(thr * thr + 2f * g * fallGravity * Mathf.Max(0.001f, fallH2)) - thr) / (g * fallGravity);
+
+        float totalAirTime = Mathf.Max(0.2f, riseT1 + riseT2 + fallT1 + fallT2);
+        float jumpStartTime = Time.time;
+
+        yield return new WaitForFixedUpdate();
+
+        bool hasReachedPeak = false;  // 착지 판정용으로만 사용 (애니메이션 매핑에는 쓰지 않음)
 
         while (true)
         {
-            if (isDead) yield break;  // (1)yield break: 코루틴을 "즉시 종료". 사망하면 점프 중단.
+            if (isDead) yield break;
 
-            // 현재 높이(점프 시작점 대비) 계산, 최고점 갱신
-            float currentHeight = Mathf.Max(0f, transform.position.y - jumpStartY);
-            if (currentHeight > actualPeakHeight)
-            {
-                actualPeakHeight = currentHeight;
-            }
-
-            // Y속도가 0 이하가 되면(=더 이상 안 올라가고 내려가기 시작하면) 정점 도달로 판정
-            if (rb.velocity.y <= 0f)
+            // 정점 도달은 착지 브레이크 조건에만 씀 (최초 1회만 기록)
+            if (!hasReachedPeak && rb.velocity.y <= 0f)
             {
                 hasReachedPeak = true;
             }
 
-            // 배치하신 5 -> 10 -> 15 -> 20 -> 25 키프레임이 각각 균등한 시간 비율로 재생되도록 매핑
-            // 정점(15~20프레임 구간)의 정중앙인 17.5/30를 최고점 기준으로 대칭 배치
-            // (1)배경: 점프 애니메이션 클립은 30fps 기준 키프레임이 5→10→15→20→25로 찍혀있고,
-            //   15~20프레임 구간이 "정점 자세"다. 이걸 물리 상태에 맞춰 재생하려면
-            //   "상승률"로 상승 구간 프레임을, "높이 비율"로 하강 구간 프레임을 계산해야 함.
-            // (2)상승 중: riseLinear = 1 - (현재 Y속도 / 초기 Y속도) → 0(막 점프함) ~ 1(정점 도달)
-            //   이걸 5/30(첫 공중 프레임) ~ 17.5/30(15와 20 사이 정중앙 = 정점 자세)로 Lerp.
-            //   Lerp(a,b,t): a에서 b까지 t(0~1) 비율만큼 선형 보간.
-            // (3)하강 중: heightRatio = 현재 높이 / 최고 높이 → 1(정점) ~ 0(착지)
-            //   fallLinear = 1 - sqrt(heightRatio) → 제곱근 써서 "천천히 시작해서 빨라지는" 가속도 곡선 만듦
-            //   (실제 낙하 속도는 가속도 붙어 빨라지니 선형보다 sqrt가 자연스러움)
-            //   이걸 17.5/30(정점) ~ 29.8/30(마지막 프레임 직전)로 Lerp.
-            // (4)왜 정점을 17.5/30으로 잡나: 키프레임 15~20 구간의 정중앙이 17.5라서, 그 지점을 "최고점 자세"로
-            //   매핑하면 상승/하강이 대칭이 돼서 자연스러움.
-            float animNormalizedTime;
-            if (!hasReachedPeak)
-            {
-                // 상승 진행도 (0.0 -> 1.0): 5프레임(5/30) -> 10프레임(10/30) -> 15프레임 중앙(17.5/30)
-                float riseLinear = 1f - Mathf.Clamp01(rb.velocity.y / Mathf.Max(0.1f, selectedJumpY));
-                animNormalizedTime = Mathf.Lerp(5f / 30f, 17.5f / 30f, riseLinear);
-            }
-            else
-            {
-                // 하강 진행도 (0.0 -> 1.0): 15프레임 중앙(17.5/30) -> 20프레임(20/30) -> 25프레임 끝(29.8/30)
-                float heightRatio = Mathf.Clamp01(currentHeight / actualPeakHeight);
-                float fallLinear = 1f - Mathf.Sqrt(heightRatio);
-                animNormalizedTime = Mathf.Lerp(17.5f / 30f, 29.8f / 30f, fallLinear);
-            }
+            // ★ 단일 등속 매핑: 경과 시간 비율로 4프레임 -> 30프레임을 선형 보간
+            //   구간 전환(상승/하강)이 없어 정점에서 끊김 없고, 추정 오차도 없음.
+            float t = Mathf.Clamp01((Time.time - jumpStartTime) / totalAirTime);
+            float animNormalizedTime = Mathf.Lerp(4f / 30f, 30f / 30f, t);
 
-            rb.velocity = new Vector2(fixedVelX, rb.velocity.y);  // X속도 계속 고정값 재대입 (공중 가속/감속 완전 차단)
-            anim.Play(jumpStateHash, 0, animNormalizedTime);       // 계산한 프레임 위치로 강제 이동
-            anim.Update(0f);                                       // 즉시 갱신
+            rb.velocity = new Vector2(fixedVelX, rb.velocity.y);
+            anim.Play(jumpStateHash, 0, animNormalizedTime);
+            anim.Update(0f);
 
-            if (hasReachedPeak && onGround)  // 정점 지났고 바닥에 닿았으면 점프 종료 (break로 while 탈출)
+            if (hasReachedPeak && onGround)
             {
                 break;
             }
 
-            yield return new WaitForFixedUpdate();  // 다음 물리틱까지 대기 후 루프 반복
+            yield return new WaitForFixedUpdate();
         }
 
-        // 사다리 구멍 위에 착지한 경우 원래 바닥 높이(jumpStartY)로 정렬
-        // (1)왜: 사다리 구멍은 바닥이 뚫려있어 Linecast로는 바닥이 감지 안 됨. 그래서 점프 시작 높이로
-        //   강제 정렬해서 "구멍에 빠지는" 버그를 막음.
+        // 사다리 구멍 위 착지 시 점프 시작 높이로 정렬
         bool hitSolidGround = Physics2D.Linecast(transform.position, transform.position - (transform.up * 0.25f), groundLayer);
         if (!hitSolidGround && (isNearLadder || isLadderTop))
         {
@@ -641,12 +617,9 @@ public class playerController : MonoBehaviour
         }
 
         isStunned = false;
-        isJumping = false;          // 점프 상태 해제
-        anim.speed = 1f;            // 애니메이터 자동 재생 복귀 (수동 프레임 조작 종료)
+        isJumping = false;
+        anim.speed = 1f;
 
-        // 방향키를 누른 채 착지하면 Idle을 거치지 않고 즉시 이동 속도와 달리기 상태 유지
-        // (1)왜: 원작은 점프 착지와 동시에 달리기가 이어져야 "끊김 없이" 느껴짐. 그냥 두면 애니메이터가
-        //   Idle로 갔다가 다시 Running으로 전환되면서 한 프레임 끊김.
         if (Mathf.Abs(axisH) > 0.1f && !ladderTrigger)
         {
             rb.velocity = new Vector2(axisH * speed, 0f);
@@ -656,9 +629,11 @@ public class playerController : MonoBehaviour
         else
         {
             rb.velocity = Vector2.zero;
-            anim.Play("Idle", 0);  // 서서 점프했으면 그냥 Idle로 복귀
+            anim.Play("Idle", 0);
         }
     }
+
+
 
     // [위층 트랩 예외 처리] 점프 중 캐릭터의 머리(중심보다 위쪽)가 천장 쪽(jumpStartY + 0.20f 이상) 트랩 밑면에 닿았을 때만 무시
     // (1)왜 필요하나: 폰포코 맵은 5층 구조라서, 플레이어가 3층에서 점프해 올라가다가 "4층 바닥에 달린 트랩(스파이크)"의

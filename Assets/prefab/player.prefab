@@ -126,8 +126,9 @@ MonoBehaviour:
   floor4Clip: {fileID: 8300000, guid: 9d02404440129704285ab28f81b14366, type: 3}
   floor5Clip: {fileID: 8300000, guid: 1be24f0b73e857a44bea7d3c6fd53d63, type: 3}
   crashSoundDuration: 0.45
+  deathSpinMultiplier: 2
   fallToFirstFloor: 1
-  walk: {fileID: 8300000, guid: b50f1c68854ca5b48bcc000cafdad50a, type: 3}
+  walk: {fileID: 8300000, guid: 3a1d1560adae48a4a93c9eff60f2225e, type: 3}
   jump: {fileID: 8300000, guid: d13a2139456520142beaac5a799601d4, type: 3}
   over: {fileID: 8300000, guid: 8979a050ed04e7a4cac30ce77a1a5716, type: 3}
 --- !u!50 &5377484396707543244

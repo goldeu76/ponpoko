@@ -1,48 +1,67 @@
-using System.Collections;
+ï»¿using System.Collections;
 using UnityEngine;
 using UnityEngine.SceneManagement;
 
 public class an3 : MonoBehaviour
 {
-    [Header("an2 ½ºÅ©¸³Æ® ÂüÁ¶ (ºñ¿öµÎ¸é ÀÚµ¿À¸·Î Ã£À½)")]
+    [Header("an2 ìŠ¤í¬ë¦½íŠ¸ ì°¸ì¡° (ë¹„ì›Œë‘ë©´ ìë™ìœ¼ë¡œ ì°¾ìŒ)")]
     [SerializeField] an2 an2Script;
 
-    [Header("³Ê±¸¸® 8¸¶¸® °ÔÀÓ ¿ÀºêÁ§Æ® (¿ŞÂÊ 1¹ø ~ ¿À¸¥ÂÊ 8¹ø ¼ø¼­)")]
+    [Header("ë„ˆêµ¬ë¦¬ 8ë§ˆë¦¬ ê²Œì„ ì˜¤ë¸Œì íŠ¸ (ì™¼ìª½ 1ë²ˆ ~ ì˜¤ë¥¸ìª½ 8ë²ˆ ìˆœì„œ)")]
     [SerializeField] Transform[] raccoons;
 
-    [Header("¿ùµå ÁÂÇ¥(World Space) ÀÌµ¿ ¹× Á¤·Ä ¼³Á¤")]
-    [SerializeField] float targetY = -0.3f;          // ³Ê±¸¸®µéÀÌ ¼­ ÀÖÀ» ¿ùµå YÁÂÇ¥
-    [SerializeField] float moveSpeed = 4.5f;         // ´Ş·Á¿À´Â ¼Óµµ (À¯´Ö/ÃÊ)
-    [SerializeField] float firstStartX = 6.0f;       // 1¹ø ³Ê±¸¸®ÀÇ ¿À¸¥ÂÊ Ãâ¹ß ¿ùµå XÁÂÇ¥
-    [SerializeField] float startQueueSpacing = 1.5f; // Ãâ¹ß ½Ã ³Ê±¸¸®µé »çÀÌÀÇ ÁÙ °£°İ
+    [Header("ì›”ë“œ ì¢Œí‘œ(World Space) ì´ë™ ë° ì •ë ¬ ì„¤ì •")]
+    [SerializeField] float targetY = -0.3f;
+    [SerializeField] float moveSpeed = 4.5f;
+    [SerializeField] float firstStartX = 6.0f;
+    [SerializeField] float startQueueSpacing = 1.5f;
 
-    // 1920x1080 ¿ùµå ÁÂÇ¥ ±âÁØ 8¸¶¸® ¸ñÇ¥ XÁÂÇ¥ (-4.2 ~ +4.2, 1.2 À¯´Ö °£°İ)
     [SerializeField] float[] targetX = { -4.2f, -3.0f, -1.8f, -0.6f, 0.6f, 1.8f, 3.0f, 4.2f };
 
-    [Header("¾Ö´Ï¸ŞÀÌ¼Ç Å¬¸³ ÀÌ¸§")]
-    [SerializeField] string runAnimName = "run";     // ´Ş·Á¿Ã ¶§ Àç»ıÇÒ ¾Ö´Ï¸ŞÀÌ¼Ç ÀÌ¸§
-    [SerializeField] string danceAnimName = "dance"; // Á¤·Ä ÈÄ Ãâ Ãã ¾Ö´Ï¸ŞÀÌ¼Ç ÀÌ¸§
+    [Header("ì• ë‹ˆë©”ì´ì…˜ í´ë¦½ ì´ë¦„")]
+    [SerializeField] string runAnimName = "run";
+    [SerializeField] string danceAnimName = "dance";
 
-    [Header("³ë·¡ ¹× ¾À ÀüÈ¯ ¼³Á¤")]
-    [SerializeField] AudioSource audioSource;        // ¿Àµğ¿À ¼Ò½º
-    [SerializeField] AudioClip danceSongClip;        // ÃãÃâ ¶§ Àç»ıÇÒ ³ë·¡ ÆÄÀÏ
-    [SerializeField] float danceDuration = 7.0f;     // Ãã Áö¼Ó ½Ã°£ (Å¬¸³ ¿¬°á ½Ã Å¬¸³ ±æÀÌ·Î ÀÚµ¿ ¼³Á¤µÊ)
-    [SerializeField] string nextSceneName = "stage1";// ÃãÀÌ ³¡³­ µÚ ³Ñ¾î°¥ ¾À ÀÌ¸§
+    [Header("ë…¸ë˜ ë° ì”¬ ì „í™˜ ì„¤ì •")]
+    [SerializeField] AudioSource audioSource;
+    [SerializeField] AudioClip danceSongClip;
+    [SerializeField] float danceDuration = 7.0f;
+    [SerializeField] string nextSceneName = "stage1";
 
     [SerializeField] GameObject comment;
 
-    private bool isStarted = false;
+    // ==============================================================
+    // âœ… ë¬¸ì œ ì›ì¸ & í•´ê²° ëª©í‘œ
+    // ì›ë˜ ì½”ë“œì—ì„œëŠ” ìŠ¤í˜ì´ìŠ¤ ë°”ë¥¼ ëˆŒë €ì„ ë•Œ ì½”ë£¨í‹´ì„ ë¨¼ì € ì‹¤í–‰í•˜ê³ 
+    // ê·¸ ë’¤ì— isStarted = true ë¡œ ì ê°”ê¸° ë•Œë¬¸ì—, ê·¸ ì§§ì€ ì‚¬ì´ì— 
+    // ìŠ¤í˜ì´ìŠ¤ë¥¼ ë˜ ëˆ„ë¥´ë©´ ì½”ë£¨í‹´ì´ ì—¬ëŸ¬ ê°œ ë™ì‹œì— ì‹¤í–‰ë˜ì–´ 
+    // ê°™ì€ ì˜¤ë¸Œì íŠ¸ë¥¼ ì¤‘ë³µìœ¼ë¡œ ì¡°ì‘ â†’ ì¶©ëŒ â†’ ëŸ°íƒ€ì„ ì—ëŸ¬ & ê²Œì„ ë©ˆì¶¤ ë°œìƒ
+    // í•´ê²°ë°©ë²•: isStarted = true ë¥¼ ì œì¼ ë¨¼ì € ì‹¤í–‰í•´ì„œ ì—°íƒ€ ì…ë ¥ ì¦‰ì‹œ ì°¨ë‹¨
+    // ==============================================================
+
+    private bool isStarted = false;       // ì—°íƒ€ ë°©ì§€ â€” ì´ë¯¸ ì‹¤í–‰ ì¤‘ì´ë©´ true
+    private Coroutine danceRoutine;       // ì‹¤í–‰ ì¤‘ì¸ ì½”ë£¨í‹´ ì¶”ì  â€” ì¤‘ë³µ ì‹¤í–‰ ì‹œ ê¸°ì¡´ ê²ƒ ì •ë¦¬ìš©
+    private bool isDestroyed = false;     // ì˜¤ë¸Œì íŠ¸ê°€ íŒŒê´´ëœ í›„ì—ë„ ì½”ë£¨í‹´ì´ ëŒì§€ ì•Šë„ë¡ ì°¨ë‹¨
 
     [SerializeField] GameObject pon_set;
+
     void Start()
     {
-        // 1. °ÔÀÓ ½ÃÀÛ ½Ã 8¸¶¸® ³Ê±¸¸®¸¦ ¹«Á¶°Ç ¾È º¸ÀÌ°Ô(²¨µÒ) Ã³¸®
-        foreach (var rac in raccoons)
+        // ì´ˆê¸°í™”: ì‹œì‘ ì‹œ ìƒíƒœë¥¼ ê¹¨ë—í•˜ê²Œ ë¦¬ì…‹
+        isStarted = false;
+        danceRoutine = null;
+        isDestroyed = false;
+
+        // ëª¨ë“  ë„ˆêµ¬ë¦¬ë¥¼ ì²˜ìŒì—ëŠ” í™”ë©´ì—ì„œ ìˆ¨ê¹€ ì²˜ë¦¬
+        if (raccoons != null)
         {
-            if (rac != null) rac.gameObject.SetActive(false);
+            foreach (var rac in raccoons)
+            {
+                if (rac != null) rac.gameObject.SetActive(false);
+            }
         }
 
-        // 2. an2 ½ºÅ©¸³Æ® ÀÚµ¿ Ã£±â
+        // an2 ìŠ¤í¬ë¦½íŠ¸ê°€ ì—°ê²°ë˜ì§€ ì•Šì•˜ë‹¤ë©´ ìë™ìœ¼ë¡œ ì°¾ì•„ì£¼ê¸°
         if (an2Script == null)
         {
             an2Script = FindObjectOfType<an2>();
@@ -51,27 +70,56 @@ public class an3 : MonoBehaviour
 
     void Update()
     {
-        // an2ÀÇ an3°¡ true°¡ µÈ ÀÌÈÄ, ½ºÆäÀÌ½º ¹Ù¸¦ ´©¸£¸é ¿¬Ãâ ½ÃÀÛ
-        if (!isStarted && an2Script != null && an2Script.an3 == true && Input.GetKeyDown(KeyCode.Space))
+        // ==============================================================
+        // âœ… í•µì‹¬: ì´ë¯¸ ì‹œì‘í–ˆê±°ë‚˜ íŒŒê´´ ì¤‘ì´ë©´ ì…ë ¥ì„ ì•„ì˜ˆ ë°›ì§€ ì•ŠìŒ
+        // ì´ ë¼ì¸ì´ ìˆì–´ì•¼ ì—°íƒ€í•´ë„ ì½”ë“œê°€ ì‹¤í–‰ë˜ì§€ ì•Šê³  ì°¨ë‹¨ë¨
+        // ==============================================================
+        if (isStarted || isDestroyed || an2Script == null) return;
+
+        // an2ì—ì„œ ì‹œì‘ ì¡°ê±´ì´ ì¶©ì¡±ë˜ê³  ìŠ¤í˜ì´ìŠ¤ ë°”ê°€ ëˆŒë¦¬ë©´ ì‹œì‘
+        if (an2Script.an3 && Input.GetKeyDown(KeyCode.Space))
         {
+            // ==============================================================
+            // âœ… ê°€ì¥ ì¤‘ìš”! ì œì¼ ë¨¼ì € ì ê¸ˆì„ ê±¸ì–´ë²„ë¦¼
+            // ì´ ë’¤ë¡œëŠ” ìŠ¤í˜ì´ìŠ¤ë¥¼ ì•„ë¬´ë¦¬ ëˆŒëŸ¬ë„ ìœ„ìª½ ì¡°ê±´ë¬¸ì—ì„œ ê±¸ë ¤ì„œ ì‹¤í–‰ë˜ì§€ ì•ŠìŒ
+            // ì›ë˜ ì½”ë“œì—ì„œëŠ” ì´ê²Œ ì œì¼ ë§ˆì§€ë§‰ì— ìˆì—ˆê¸° ë•Œë¬¸ì— ë¬¸ì œê°€ ìƒê²¼ì—ˆìŒ
+            // ==============================================================
             isStarted = true;
-            pon_set.SetActive(false);
-            StartCoroutine(IntroDanceRoutine());
+
+            pon_set?.SetActive(false); // ?. â†’ ì˜¤ë¸Œì íŠ¸ê°€ ì—†ì–´ë„ ì—ëŸ¬ ì•ˆ ë‚¨
+
+            // í˜¹ì‹œ ì•„ì§ ì´ì „ ì½”ë£¨í‹´ì´ ëŒê³  ìˆë‹¤ë©´ ë¨¼ì € ë©ˆì¶°ì£¼ê¸°
+            if (danceRoutine != null)
+            {
+                StopCoroutine(danceRoutine);
+            }
+
+            // ìƒˆë¡œìš´ ì½”ë£¨í‹´ì„ ì‹œì‘í•˜ê³  ì°¸ì¡°ë¥¼ ë³´ê´€ (ë‚˜ì¤‘ì— ì •ë¦¬í•˜ê¸° ìœ„í•´)
+            danceRoutine = StartCoroutine(SafeIntroDanceRoutine());
         }
     }
 
-    IEnumerator IntroDanceRoutine()
+    private IEnumerator SafeIntroDanceRoutine()
     {
-        int count = Mathf.Min(raccoons.Length, targetX.Length);
+        // ì”¬ì´ ì´ë¯¸ íŒŒê´´ëœ ìƒíƒœë©´ ì¦‰ì‹œ ì¤‘ë‹¨
+        if (isDestroyed) yield break;
+
+        int count = 0;
+        if (raccoons != null && targetX != null)
+        {
+            count = Mathf.Min(raccoons.Length, targetX.Length);
+        }
+
         Animator[] anims = new Animator[count];
         bool[] hasArrived = new bool[count];
 
-        // 1. 8¸¶¸® ³Ê±¸¸®¸¦ È­¸é¿¡ ÄÑ°í, ¿À¸¥ÂÊ Ãâ¹ß À§Ä¡¿¡ ÁÙ ¼¼¿î µÚ 'run' ¾Ö´Ï¸ŞÀÌ¼Ç Àç»ı
+        // 1. ë„ˆêµ¬ë¦¬ë“¤ì„ í™”ë©´ì— ë³´ì´ê²Œ í•˜ê³  ì‹œì‘ ìœ„ì¹˜ì— ë°°ì¹˜ + ë‹¬ë¦¬ê¸° ì• ë‹ˆë©”ì´ì…˜ ì¬ìƒ
         for (int i = 0; i < count; i++)
         {
+            if (isDestroyed) yield break; // ì¤‘ê°„ì— íŒŒê´´ë˜ë©´ ì¦‰ì‹œ íƒˆì¶œ
             if (raccoons[i] == null) continue;
 
-            raccoons[i].gameObject.SetActive(true); // ÀÌ¶§ ºñ·Î¼Ò º¸ÀÓ
+            raccoons[i].gameObject.SetActive(true);
 
             float startX = firstStartX + (i * startQueueSpacing);
             raccoons[i].position = new Vector3(startX, targetY, 0f);
@@ -88,14 +136,15 @@ public class an3 : MonoBehaviour
             }
         }
 
-        // 2. µ¿½Ã¿¡ ¿ŞÂÊÀ¸·Î ÀÌµ¿ÇÏ¸ç ÀÚ±â Å¸°Ù ÁÂÇ¥(targetX[i])¿¡ µµÂøÇÏ´Â ¼ø¼­´ë·Î Á¤Áö
+        // 2. ê° ë„ˆêµ¬ë¦¬ë¥¼ ëª©í‘œ ìœ„ì¹˜ê¹Œì§€ ì„œì„œíˆ ì´ë™
         bool allArrived = false;
-        while (!allArrived)
+        while (!allArrived && !isDestroyed)
         {
             allArrived = true;
 
             for (int i = 0; i < count; i++)
             {
+                if (isDestroyed) yield break;
                 if (raccoons[i] == null || hasArrived[i]) continue;
 
                 Vector3 pos = raccoons[i].position;
@@ -124,18 +173,20 @@ public class an3 : MonoBehaviour
             yield return null;
         }
 
-        // 3. 0.3ÃÊ ´ë±â ÈÄ ³ë·¡ Àç»ı°ú µ¿½Ã¿¡ 8¸¶¸® Àü¿ø 'dance' ¾Ö´Ï¸ŞÀÌ¼Ç ½ÃÀÛ
+        // 3. ì ê¹ ëŒ€ê¸° í›„ ìŒì•… ì¬ìƒ + ì¶¤ ì• ë‹ˆë©”ì´ì…˜ ì‹œì‘
         yield return new WaitForSeconds(0.3f);
+        if (isDestroyed) yield break;
 
         if (audioSource != null && danceSongClip != null)
         {
-            comment.SetActive(true);
+            comment?.SetActive(true);
             audioSource.PlayOneShot(danceSongClip);
             danceDuration = danceSongClip.length;
         }
 
         for (int i = 0; i < count; i++)
         {
+            if (isDestroyed) yield break;
             if (anims[i] != null)
             {
                 anims[i].Play(danceAnimName, 0, 0f);
@@ -143,8 +194,44 @@ public class an3 : MonoBehaviour
             }
         }
 
-        // 4. ³ë·¡°¡ ³¡³¯ ¶§±îÁö ÃãÀ» Ãá µÚ ´ÙÀ½ ¾ÀÀ¸·Î ÀÌµ¿
+        // 4. ìŒì•… ê¸¸ì´ë§Œí¼ ëŒ€ê¸°í•œ ë’¤ ë‹¤ìŒ ì”¬ìœ¼ë¡œ ì „í™˜
         yield return new WaitForSeconds(danceDuration);
-        SceneManager.LoadScene(nextSceneName);
+        if (isDestroyed) yield break;
+
+        // ìƒíƒœ ë¦¬ì…‹ â€” ë‹¤ìŒì— ë‹¤ì‹œ ì‚¬ìš©í•  ìˆ˜ ìˆë„ë¡
+        isStarted = false;
+        danceRoutine = null;
+
+        if (!string.IsNullOrEmpty(nextSceneName))
+        {
+            SceneManager.LoadScene(nextSceneName);
+        }
+    }
+
+    // ==============================================================
+    // âœ… ì˜¤ë¸Œì íŠ¸ê°€ íŒŒê´´ë  ë•Œ ì½”ë£¨í‹´ì„ ì•ˆì „í•˜ê²Œ ì •ë¦¬
+    // ì”¬ ì „í™˜ ì¤‘ì— ì•„ì§ ëŒê³  ìˆëŠ” ì½”ë£¨í‹´ì´ ìˆìœ¼ë©´ ë©ˆì¶°ì„œ 
+    // "destroyed object was accessed" ì—ëŸ¬ ë°©ì§€
+    // ==============================================================
+    void OnDestroy()
+    {
+        isDestroyed = true;
+
+        if (danceRoutine != null)
+        {
+            StopCoroutine(danceRoutine);
+            danceRoutine = null;
+        }
+    }
+
+    // ì˜¤ë¸Œì íŠ¸ê°€ ë¹„í™œì„±í™”ë  ë•Œë„ ìƒíƒœ ë¦¬ì…‹
+    void OnDisable()
+    {
+        if (danceRoutine != null)
+        {
+            StopCoroutine(danceRoutine);
+            danceRoutine = null;
+        }
+        isStarted = false;
     }
 }

@@ -169,5 +169,5 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   scoreValue: 100
-  eat: {fileID: 8300000, guid: e515e2290b219dd42ad09ab8e5db1684, type: 3}
+  eat: {fileID: 8300000, guid: 14e98da0ef3f954439daf49ca17f2cbd, type: 3}
   score: 100
