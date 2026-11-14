@@ -31,28 +31,33 @@ public class an3 : MonoBehaviour
     [SerializeField] GameObject comment;
 
     // ==============================================================
-    // ✅ 문제 원인 & 해결 목표
-    // 원래 코드에서는 스페이스 바를 눌렀을 때 코루틴을 먼저 실행하고
-    // 그 뒤에 isStarted = true 로 잠갔기 때문에, 그 짧은 사이에 
-    // 스페이스를 또 누르면 코루틴이 여러 개 동시에 실행되어 
-    // 같은 오브젝트를 중복으로 조작 → 충돌 → 런타임 에러 & 게임 멈춤 발생
-    // 해결방법: isStarted = true 를 제일 먼저 실행해서 연타 입력 즉시 차단
+    // 🚨 진짜 문제 원인
+    // Update()는 매 프레임 실행되기 때문에:
+    // 1. an2.an3가 true가 되는 그 프레임에 스페이스가 눌리면
+    // 2. isStarted = true가 실행되기 전에 여러 번 진입할 수 있음
+    // 3. 그래서 가끔 코루틴이 2개 실행 → 가끔 에러/멈춤 발생
+    // ✅ 해결: 입력 감지 즉시 가장 먼저 잠가서 틈 자체를 없앰
     // ==============================================================
 
-    private bool isStarted = false;       // 연타 방지 — 이미 실행 중이면 true
-    private Coroutine danceRoutine;       // 실행 중인 코루틴 추적 — 중복 실행 시 기존 것 정리용
-    private bool isDestroyed = false;     // 오브젝트가 파괴된 후에도 코루틴이 돌지 않도록 차단
+    private bool isRunning = false;      // ✅ 이름 변경: isStarted → isRunning (더 명확하게)
+    private Coroutine activeRoutine;     // 실행 중인 코루틴 추적
+    private bool isQuitting = false;     // 게임/씬 종료 중일 때 true
 
     [SerializeField] GameObject pon_set;
 
     void Start()
     {
-        // 초기화: 시작 시 상태를 깨끗하게 리셋
-        isStarted = false;
-        danceRoutine = null;
-        isDestroyed = false;
+        ResetState(); // 시작 시 완전 초기화
+    }
 
-        // 모든 너구리를 처음에는 화면에서 숨김 처리
+    // 상태를 완전히 리셋하는 함수
+    void ResetState()
+    {
+        isRunning = false;
+        activeRoutine = null;
+        isQuitting = false;
+
+        // 너구리 숨기기
         if (raccoons != null)
         {
             foreach (var rac in raccoons)
@@ -61,7 +66,7 @@ public class an3 : MonoBehaviour
             }
         }
 
-        // an2 스크립트가 연결되지 않았다면 자동으로 찾아주기
+        // an2 자동 찾기
         if (an2Script == null)
         {
             an2Script = FindObjectOfType<an2>();
@@ -71,39 +76,44 @@ public class an3 : MonoBehaviour
     void Update()
     {
         // ==============================================================
-        // ✅ 핵심: 이미 시작했거나 파괴 중이면 입력을 아예 받지 않음
-        // 이 라인이 있어야 연타해도 코드가 실행되지 않고 차단됨
+        // ✅ 가장 위에 둠: 이미 실행 중이거나 종료 중이면 아예 진행하지 않음
+        // 이 라인이 제일 위에 있어야 틈이 생기지 않음
         // ==============================================================
-        if (isStarted || isDestroyed || an2Script == null) return;
+        if (isRunning || isQuitting || an2Script == null)
+            return;
 
-        // an2에서 시작 조건이 충족되고 스페이스 바가 눌리면 시작
+        // 시작 조건 충족 + 스페이스 입력
         if (an2Script.an3 && Input.GetKeyDown(KeyCode.Space))
         {
             // ==============================================================
-            // ✅ 가장 중요! 제일 먼저 잠금을 걸어버림
-            // 이 뒤로는 스페이스를 아무리 눌러도 위쪽 조건문에서 걸려서 실행되지 않음
-            // 원래 코드에서는 이게 제일 마지막에 있었기 때문에 문제가 생겼었음
+            // ✅ 진짜 핵심: 무엇보다도 제일 먼저 잠근다!
+            // 이 한줄이 다른 모든 코드보다 위에 있어야 
+            // 아무리 빨리 연타해도 절대 중복 실행되지 않음
             // ==============================================================
-            isStarted = true;
+            isRunning = true;
 
-            pon_set?.SetActive(false); // ?. → 오브젝트가 없어도 에러 안 남
-
-            // 혹시 아직 이전 코루틴이 돌고 있다면 먼저 멈춰주기
-            if (danceRoutine != null)
+            // 이전에 실행 중이던 코루틴이 있다면 완전히 정리
+            if (activeRoutine != null)
             {
-                StopCoroutine(danceRoutine);
+                StopCoroutine(activeRoutine);
+                activeRoutine = null;
             }
 
-            // 새로운 코루틴을 시작하고 참조를 보관 (나중에 정리하기 위해)
-            danceRoutine = StartCoroutine(SafeIntroDanceRoutine());
+            // 오브젝트 처리
+            if (pon_set != null)
+                pon_set.SetActive(false);
+
+            // 새로운 코루틴 시작 및 추적 보관
+            activeRoutine = StartCoroutine(DanceSequenceRoutine());
         }
     }
 
-    private IEnumerator SafeIntroDanceRoutine()
+    private IEnumerator DanceSequenceRoutine()
     {
-        // 씬이 이미 파괴된 상태면 즉시 중단
-        if (isDestroyed) yield break;
+        // 시작 전 종료 체크
+        if (isQuitting) yield break;
 
+        // 배열 안전하게 처리
         int count = 0;
         if (raccoons != null && targetX != null)
         {
@@ -111,12 +121,14 @@ public class an3 : MonoBehaviour
         }
 
         Animator[] anims = new Animator[count];
-        bool[] hasArrived = new bool[count];
+        bool[] arrived = new bool[count];
 
-        // 1. 너구리들을 화면에 보이게 하고 시작 위치에 배치 + 달리기 애니메이션 재생
+        // ======================================
+        // 1. 너구리 출발 위치 배치
+        // ======================================
         for (int i = 0; i < count; i++)
         {
-            if (isDestroyed) yield break; // 중간에 파괴되면 즉시 탈출
+            if (isQuitting) yield break;
             if (raccoons[i] == null) continue;
 
             raccoons[i].gameObject.SetActive(true);
@@ -136,16 +148,18 @@ public class an3 : MonoBehaviour
             }
         }
 
-        // 2. 각 너구리를 목표 위치까지 서서히 이동
-        bool allArrived = false;
-        while (!allArrived && !isDestroyed)
+        // ======================================
+        // 2. 목표 위치까지 이동
+        // ======================================
+        bool allDone = false;
+        while (!allDone && !isQuitting)
         {
-            allArrived = true;
+            allDone = true;
 
             for (int i = 0; i < count; i++)
             {
-                if (isDestroyed) yield break;
-                if (raccoons[i] == null || hasArrived[i]) continue;
+                if (isQuitting) yield break;
+                if (raccoons[i] == null || arrived[i]) continue;
 
                 Vector3 pos = raccoons[i].position;
                 pos.x -= moveSpeed * Time.deltaTime;
@@ -154,7 +168,7 @@ public class an3 : MonoBehaviour
                 {
                     pos.x = targetX[i];
                     raccoons[i].position = pos;
-                    hasArrived[i] = true;
+                    arrived[i] = true;
 
                     if (anims[i] != null)
                     {
@@ -166,27 +180,31 @@ public class an3 : MonoBehaviour
                 else
                 {
                     raccoons[i].position = pos;
-                    allArrived = false;
+                    allDone = false;
                 }
             }
 
             yield return null;
         }
 
-        // 3. 잠깐 대기 후 음악 재생 + 춤 애니메이션 시작
+        // ======================================
+        // 3. 춤 준비 및 음악 재생
+        // ======================================
         yield return new WaitForSeconds(0.3f);
-        if (isDestroyed) yield break;
+        if (isQuitting) yield break;
 
         if (audioSource != null && danceSongClip != null)
         {
-            comment?.SetActive(true);
+            if (comment != null)
+                comment.SetActive(true);
+
             audioSource.PlayOneShot(danceSongClip);
             danceDuration = danceSongClip.length;
         }
 
         for (int i = 0; i < count; i++)
         {
-            if (isDestroyed) yield break;
+            if (isQuitting) yield break;
             if (anims[i] != null)
             {
                 anims[i].Play(danceAnimName, 0, 0f);
@@ -194,13 +212,14 @@ public class an3 : MonoBehaviour
             }
         }
 
-        // 4. 음악 길이만큼 대기한 뒤 다음 씬으로 전환
+        // ======================================
+        // 4. 춤 대기 후 씬 전환
+        // ======================================
         yield return new WaitForSeconds(danceDuration);
-        if (isDestroyed) yield break;
+        if (isQuitting) yield break;
 
-        // 상태 리셋 — 다음에 다시 사용할 수 있도록
-        isStarted = false;
-        danceRoutine = null;
+        // 씬 전환 전 종료 플래그 설정
+        isQuitting = true;
 
         if (!string.IsNullOrEmpty(nextSceneName))
         {
@@ -209,29 +228,41 @@ public class an3 : MonoBehaviour
     }
 
     // ==============================================================
-    // ✅ 오브젝트가 파괴될 때 코루틴을 안전하게 정리
-    // 씬 전환 중에 아직 돌고 있는 코루틴이 있으면 멈춰서 
-    // "destroyed object was accessed" 에러 방지
+    // 유니티 생명주기 이벤트 처리
     // ==============================================================
+
     void OnDestroy()
     {
-        isDestroyed = true;
-
-        if (danceRoutine != null)
-        {
-            StopCoroutine(danceRoutine);
-            danceRoutine = null;
-        }
+        isQuitting = true;
+        StopActiveRoutine();
     }
 
-    // 오브젝트가 비활성화될 때도 상태 리셋
     void OnDisable()
     {
-        if (danceRoutine != null)
+        StopActiveRoutine();
+        // ❗ 주의: OnDisable에서 isRunning = false 하면 안 됨
+        // 씬 전환 중에 리셋되면 접근 오류 생김
+    }
+
+    void OnApplicationQuit()
+    {
+        isQuitting = true;
+    }
+
+    // 안전하게 코루틴 정리하는 전용 함수
+    void StopActiveRoutine()
+    {
+        if (activeRoutine != null)
         {
-            StopCoroutine(danceRoutine);
-            danceRoutine = null;
+            try
+            {
+                StopCoroutine(activeRoutine);
+            }
+            catch (System.Exception)
+            {
+                // 이미 멈춰있거나 파괴된 경우 무시
+            }
+            activeRoutine = null;
         }
-        isStarted = false;
     }
 }
